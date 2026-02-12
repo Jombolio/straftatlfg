@@ -16,14 +16,14 @@ class LFG(commands.Cog):
 
     def __init__(self, bot: Red):
         self.bot = bot
-        self.sticky_enabled = False
-        self.sticky_channel_id = None
-        self.last_sticky_id = None
+        self.sticky_channels = set()  # Set of channel IDs where sticky is enabled
+        self.last_sticky_messages = {}  # channel_id: message_id
 
     async def _send_sticky(self, channel: discord.TextChannel):
-        if self.last_sticky_id:
+        last_id = self.last_sticky_messages.get(channel.id)
+        if last_id:
             try:
-                msg = await channel.fetch_message(self.last_sticky_id)
+                msg = await channel.fetch_message(last_id)
                 await msg.delete()
             except Exception:
                 pass
@@ -39,17 +39,17 @@ class LFG(commands.Cog):
             color=discord.Color.blue()
         )
         new_msg = await channel.send(embed=embed)
-        self.last_sticky_id = new_msg.id
+        self.last_sticky_messages[channel.id] = new_msg.id
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.author.bot or not message.guild:
             return
         
-        if not self.sticky_enabled or message.channel.id != self.sticky_channel_id:
+        if message.channel.id not in self.sticky_channels:
             return
 
-        if message.id == self.last_sticky_id:
+        if message.id == self.last_sticky_messages.get(message.channel.id):
             return
             
         await self._send_sticky(message.channel)
@@ -154,24 +154,22 @@ class LFG(commands.Cog):
         if not any(role.id == self.TEST_ROLE_ID for role in ctx.author.roles):
             return await ctx.send("You do not have permission to use this command.", delete_after=10)
 
-        self.sticky_enabled = not self.sticky_enabled
-
-        if self.sticky_enabled:
-            self.sticky_channel_id = ctx.channel.id
-            await self._send_sticky(ctx.channel)
-            await ctx.send(f"Sticky message enabled in {ctx.channel.mention}.", delete_after=10)
-        else:
-            if self.last_sticky_id and self.sticky_channel_id:
+        if ctx.channel.id in self.sticky_channels:
+            # Disable
+            self.sticky_channels.remove(ctx.channel.id)
+            last_id = self.last_sticky_messages.pop(ctx.channel.id, None)
+            if last_id:
                 try:
-                    channel = ctx.guild.get_channel(self.sticky_channel_id)
-                    if channel:
-                        msg = await channel.fetch_message(self.last_sticky_id)
-                        await msg.delete()
+                    msg = await ctx.channel.fetch_message(last_id)
+                    await msg.delete()
                 except Exception:
                     pass
-            self.last_sticky_id = None
-            self.sticky_channel_id = None
-            await ctx.send("Sticky message disabled.", delete_after=10)
+            await ctx.send("Sticky message disabled in this channel.", delete_after=10)
+        else:
+            # Enable
+            self.sticky_channels.add(ctx.channel.id)
+            await self._send_sticky(ctx.channel)
+            await ctx.send(f"Sticky message enabled in {ctx.channel.mention}.", delete_after=10)
 
     @lfg.error
     @testlfg.error
