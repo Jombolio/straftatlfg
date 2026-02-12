@@ -1,7 +1,7 @@
 import re
 import random
 import discord
-from redbot.core import commands, Config
+from redbot.core import commands
 from redbot.core.bot import Red
 
 class LFG(commands.Cog):
@@ -155,29 +155,23 @@ class LFG(commands.Cog):
         if not any(role.id == self.TEST_ROLE_ID for role in ctx.author.roles):
             return await ctx.send("You do not have permission to use this command.", delete_after=10)
 
-        guild_data = self.config.guild(ctx.guild)
-        current = await guild_data.sticky_enabled()
-        new_state = not current
-        
-        await guild_data.sticky_enabled.set(new_state)
+        self.sticky_enabled = not self.sticky_enabled
 
-        if new_state:
-            await guild_data.sticky_channel_id.set(ctx.channel.id)
+        if self.sticky_enabled:
+            self.sticky_channel_id = ctx.channel.id
             await self._send_sticky(ctx.channel)
             await ctx.send(f"Sticky message enabled in {ctx.channel.mention}.", delete_after=10)
         else:
-            last_id = await guild_data.last_sticky_id()
-            sticky_channel_id = await guild_data.sticky_channel_id()
-            if last_id and sticky_channel_id:
+            if self.last_sticky_id and self.sticky_channel_id:
                 try:
-                    channel = ctx.guild.get_channel(sticky_channel_id)
+                    channel = ctx.guild.get_channel(self.sticky_channel_id)
                     if channel:
-                        msg = await channel.fetch_message(last_id)
+                        msg = await channel.fetch_message(self.last_sticky_id)
                         await msg.delete()
-                except (discord.NotFound, discord.Forbidden, AttributeError):
+                except Exception:
                     pass
-            await guild_data.last_sticky_id.set(None)
-            await guild_data.sticky_channel_id.set(None)
+            self.last_sticky_id = None
+            self.sticky_channel_id = None
             await ctx.send("Sticky message disabled.", delete_after=10)
 
     @lfg.error
