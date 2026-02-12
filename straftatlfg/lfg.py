@@ -75,8 +75,8 @@ class LFG(commands.Cog):
         await self._handle_sticky(message.channel)
 
     async def _process_lfg(self, ctx: commands.Context, channel_id: int, lobby_id: str, notes: str):
-        if ctx.channel.id != channel_id:
-            return await ctx.send(f"This command can only be used in <#{channel_id}>.", delete_after=10)
+        if ctx.channel.id != 1310689512615051345:
+            return await ctx.send("This command can only be used in <#1310689512615051345>.", delete_after=10)
 
         if not lobby_id.isdigit():
             ctx.command.reset_cooldown(ctx)
