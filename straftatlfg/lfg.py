@@ -34,10 +34,9 @@ class LFG(commands.Cog):
             title="How to use the LFG system",
             description=(
                 "**Role Toggle**: You can use `!lfg-role` in <#1310689512615051345> to add/remove the role at any time!\n\n"
-                "To post an LFG message, use the following command:\n"
-                "`!lfg <lobby_id> <notes>`\n"
+                "To post an LFG message, use the following command: `!lfg <lobby_id> <notes>`\n"
                 "> **Lobby ID**: Must be numerical, no alphabetical characters.\n"
-                "> **Notes**: Describe what you are looking for like Casual or Competitive Matches!\n"
+                "> **Notes**: Describe what you are looking for like casual or competitive matches!\n"
             ),
             color=discord.Color.blue()
         )
