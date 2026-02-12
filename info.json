@@ -1,0 +1,10 @@
+{
+    "author": ["jombo.uk"],
+    "name": "LFG",
+    "short": "Private cog for Straftat Discord Server.",
+    "description": "Allows users to post LFG messages pinging the Matchmaking role, restricted to a specific channel and a cooldown.",
+    "tags": ["utility", "lfg", "roles"],
+    "min_bot_version": "0.1",
+    "hidden": false,
+    "end_user_data_statement": "This cog does not store any End User Data."
+}
