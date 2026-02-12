@@ -33,11 +33,11 @@ class LFG(commands.Cog):
         embed = discord.Embed(
             title="How to use the LFG system",
             description=(
-                "**Toggle Role**: You can use `!lfg-role` in <#1310689512615051345> to add/remove the role at any time!\n"
+                "**Role Toggle**: You can use `!lfg-role` in <#1310689512615051345> to add/remove the role at any time!\n\n"
                 "To post an LFG message, use the following command:\n"
-                "`!lfg <lobby_id> <notes>`\n\n"
-                "• **Lobby ID**: Must be numerical, no alphabetical characters.\n"
-                "• **Notes**: Describe what you are looking for like Casual or Competitive Matches!\n"
+                "`!lfg <lobby_id> <notes>`\n"
+                "> **Lobby ID**: Must be numerical, no alphabetical characters.\n"
+                "> **Notes**: Describe what you are looking for like Casual or Competitive Matches!\n"
             ),
             color=discord.Color.blue()
         )
