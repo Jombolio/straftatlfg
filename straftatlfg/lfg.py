@@ -16,18 +16,16 @@ class LFG(commands.Cog):
 
     def __init__(self, bot: Red):
         self.bot = bot
-        self.config = Config.get_conf(self, identifier=837461928374)
-        self.config.register_guild(sticky_enabled=False, last_sticky_id=None, sticky_channel_id=None)
+        self.sticky_enabled = False
+        self.sticky_channel_id = None
+        self.last_sticky_id = None
 
     async def _send_sticky(self, channel: discord.TextChannel):
-        guild_data = self.config.guild(channel.guild)
-        last_id = await guild_data.last_sticky_id()
-        
-        if last_id:
+        if self.last_sticky_id:
             try:
-                msg = await channel.fetch_message(last_id)
+                msg = await channel.fetch_message(self.last_sticky_id)
                 await msg.delete()
-            except (discord.NotFound, discord.Forbidden):
+            except Exception:
                 pass
 
         embed = discord.Embed(
@@ -42,19 +40,17 @@ class LFG(commands.Cog):
             color=discord.Color.blue()
         )
         new_msg = await channel.send(embed=embed)
-        await guild_data.last_sticky_id.set(new_msg.id)
+        self.last_sticky_id = new_msg.id
 
     @commands.Cog.listener()
-    async def on_message_without_command(self, message: discord.Message):
+    async def on_message(self, message: discord.Message):
         if message.author.bot or not message.guild:
             return
         
-        guild_data = self.config.guild(message.guild)
-        if not await guild_data.sticky_enabled():
+        if not self.sticky_enabled or message.channel.id != self.sticky_channel_id:
             return
-            
-        sticky_channel_id = await guild_data.sticky_channel_id()
-        if message.channel.id != sticky_channel_id:
+
+        if message.id == self.last_sticky_id:
             return
             
         await self._send_sticky(message.channel)
