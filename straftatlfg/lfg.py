@@ -1,4 +1,5 @@
 import re
+import random
 import discord
 from redbot.core import commands
 from redbot.core.bot import Red
@@ -32,9 +33,12 @@ class LFG(commands.Cog):
         if not role:
             return await ctx.send("LFG Role not found. Please contact an administrator.")
 
+        title = "Euuuuuugh!" if random.randint(1, 1000) == 1 else "Looking For Group"
+        color = discord.Color.green() if any(r.id == 1387554310832918528 for r in ctx.author.roles) else discord.Color.blue()
+        
         embed = discord.Embed(
-            title="Looking For Group",
-            color=discord.Color.blue(),
+            title=title,
+            color=color,
             description=notes
         )
         embed.add_field(name="Lobby ID", value=f"`{lobby_id}`", inline=True)
@@ -79,8 +83,34 @@ class LFG(commands.Cog):
         
         await self._process_lfg(ctx, self.TEST_CHANNEL_ID, lobby_id, notes)
 
+    @commands.command(name="lfg-role")
+    @commands.guild_only()
+    async def lfg_role(self, ctx: commands.Context):
+        """
+        Toggle the LFG role.
+        """
+        role = ctx.guild.get_role(self.LFG_ROLE_ID)
+        if not role:
+            return await ctx.send("LFG Role not found. Please contact an administrator.")
+
+        if role in ctx.author.roles:
+            try:
+                await ctx.author.remove_roles(role, reason="LFG role toggle")
+                await ctx.send("Removed the LFG role.", delete_after=10)
+                await ctx.message.add_reaction("❌")
+            except discord.Forbidden:
+                await ctx.send("I do not have permission to remove that role.")
+        else:
+            try:
+                await ctx.author.add_roles(role, reason="LFG role toggle")
+                await ctx.send("Added the LFG role.", delete_after=10)
+                await ctx.message.add_reaction("✅")
+            except discord.Forbidden:
+                await ctx.send("I do not have permission to add that role.")
+
     @lfg.error
     @testlfg.error
+    @lfg_role.error
     async def lfg_error(self, ctx, error):
         if isinstance(error, commands.CommandOnCooldown):
             await ctx.send(f"You are on cooldown. Try again in {error.retry_after:.0f} seconds.", delete_after=10)
