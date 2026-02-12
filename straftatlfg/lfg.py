@@ -1,4 +1,3 @@
-import asyncio
 import discord
 from redbot.core import commands
 from redbot.core.bot import Red
@@ -35,33 +34,19 @@ class LFG(commands.Cog):
         )
         embed.add_field(name="Lobby ID", value=f"`{lobby_id}`", inline=True)
         embed.add_field(name="Host", value=ctx.author.mention, inline=True)
-        embed.set_footer(text="Join the lobby using the ID above!")
+        embed.set_footer(text="Join the lobby using the ID above!", icon_url=ctx.author.display_avatar.url)
 
         content = f"{role.mention}"
         
-        toggle_mentionable = not role.mentionable
-        if toggle_mentionable:
-            try:
-                await role.edit(mentionable=True, reason="LFG Mention")
-            except discord.Forbidden:
-                toggle_mentionable = False
-
         await ctx.send(
             content=content,
             embed=embed,
             allowed_mentions=discord.AllowedMentions(roles=[role])
         )
 
-        if toggle_mentionable:
-            await asyncio.sleep(5)
-            try:
-                await role.edit(mentionable=False, reason="LFG Mention Cleanup")
-            except discord.Forbidden:
-                pass
-        
         try:
-            await ctx.message.delete()
-        except discord.Forbidden:
+            await ctx.message.add_reaction("✅")
+        except discord.DiscordException:
             pass
 
     @commands.command()
