@@ -1,3 +1,4 @@
+import re
 import discord
 from redbot.core import commands
 from redbot.core.bot import Red
@@ -22,6 +23,10 @@ class LFG(commands.Cog):
         if not lobby_id.isdigit():
             ctx.command.reset_cooldown(ctx)
             return await ctx.send("The Lobby ID must contain only numerical characters.", delete_after=10)
+
+        # Sanitize notes: remove masked links and raw URLs
+        notes = re.sub(r"\[([^\]]+)\]\(https?://[^\s\)]+\)", r"\1", notes)
+        notes = re.sub(r"https?://[^\s]+", "", notes)
 
         role = ctx.guild.get_role(self.LFG_ROLE_ID)
         if not role:
