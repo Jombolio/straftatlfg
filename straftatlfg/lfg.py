@@ -1,7 +1,7 @@
 import re
 import random
 import discord
-from redbot.core import commands
+from redbot.core import commands, Config
 from redbot.core.bot import Red
 
 class LFG(commands.Cog):
@@ -16,6 +16,44 @@ class LFG(commands.Cog):
 
     def __init__(self, bot: Red):
         self.bot = bot
+        self.config = Config.get_conf(self, identifier=837461928374)
+        self.config.register_guild(sticky_enabled=False, last_sticky_id=None)
+
+    async def _send_sticky(self, channel: discord.TextChannel):
+        guild_data = self.config.guild(channel.guild)
+        last_id = await guild_data.last_sticky_id()
+        
+        if last_id:
+            try:
+                msg = await channel.fetch_message(last_id)
+                await msg.delete()
+            except (discord.NotFound, discord.Forbidden):
+                pass
+
+        embed = discord.Embed(
+            title="How to use the LFG system",
+            description=(
+                "To post an LFG message, use the following command:\n"
+                "`!lfg <lobby_id> <notes>`\n\n"
+                "• **Lobby ID**: Must be numerical.\n"
+                "• **Notes**: Describe what you are looking for.\n"
+                "• **Toggle Role**: Use `!lfg-role` to subscribe/unsubscribe from pings."
+            ),
+            color=discord.Color.blue()
+        )
+        new_msg = await channel.send(embed=embed)
+        await guild_data.last_sticky_id.set(new_msg.id)
+
+    @commands.Cog.listener()
+    async def on_message_without_command(self, message: discord.Message):
+        if message.author.bot or not message.guild:
+            return
+        if message.channel.id != self.LFG_CHANNEL_ID:
+            return
+        if not await self.config.guild(message.guild).sticky_enabled():
+            return
+            
+        await self._send_sticky(message.channel)
 
     async def _process_lfg(self, ctx: commands.Context, channel_id: int, lobby_id: str, notes: str):
         if ctx.channel.id != channel_id:
@@ -107,6 +145,36 @@ class LFG(commands.Cog):
                 await ctx.message.add_reaction("✅")
             except discord.Forbidden:
                 await ctx.send("I do not have permission to add that role.")
+
+    @commands.command(name="toggle-sticky")
+    @commands.guild_only()
+    async def toggle_sticky(self, ctx: commands.Context):
+        """
+        Toggle the sticky info message in the LFG channel.
+        """
+        if not any(role.id == self.TEST_ROLE_ID for role in ctx.author.roles):
+            return await ctx.send("You do not have permission to use this command.", delete_after=10)
+
+        current = await self.config.guild(ctx.guild).sticky_enabled()
+        new_state = not current
+        await self.config.guild(ctx.guild).sticky_enabled.set(new_state)
+
+        if new_state:
+            channel = ctx.guild.get_channel(self.LFG_CHANNEL_ID)
+            if channel:
+                await self._send_sticky(channel)
+            await ctx.send("Sticky message enabled.", delete_after=10)
+        else:
+            last_id = await self.config.guild(ctx.guild).last_sticky_id()
+            if last_id:
+                try:
+                    channel = ctx.guild.get_channel(self.LFG_CHANNEL_ID)
+                    msg = await channel.fetch_message(last_id)
+                    await msg.delete()
+                except (discord.NotFound, discord.Forbidden, AttributeError):
+                    pass
+                await self.config.guild(ctx.guild).last_sticky_id.set(None)
+            await ctx.send("Sticky message disabled.", delete_after=10)
 
     @lfg.error
     @testlfg.error
