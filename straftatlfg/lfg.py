@@ -103,8 +103,12 @@ class LFG(commands.Cog):
         embed.set_footer(text="Join the lobby using the ID above!", icon_url=ctx.author.display_avatar.url)
 
         content = f"{role.mention}"
-        
-        await ctx.send(
+
+        lfg_channel = ctx.guild.get_channel(1284536580941287598)
+        if not lfg_channel:
+            return await ctx.send("LFG channel not found. Please contact an administrator.")
+
+        await lfg_channel.send(
             content=content,
             embed=embed,
             allowed_mentions=discord.AllowedMentions(roles=[role])
