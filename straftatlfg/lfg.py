@@ -1,7 +1,8 @@
 import re
 import random
 import discord
-from redbot.core import commands
+import asyncio
+from redbot.core import commands, Config, checks
 from redbot.core.bot import Red
 
 class LFG(commands.Cog):
@@ -16,48 +17,60 @@ class LFG(commands.Cog):
 
     def __init__(self, bot: Red):
         self.bot = bot
-        self.active_sticky_channels = [] # List of channel IDs
-        self.sticky_cache = {} # channel_id: message_id
+        self.config = Config.get_conf(self, identifier=2736452831, force_registration=True)
+        default_guild = {
+            "active_sticky_channels": [],
+            "sticky_cache": {}  # channel_id (str): message_id (int)
+        }
+        self.config.register_guild(**default_guild)
 
     async def _handle_sticky(self, channel: discord.TextChannel):
-        # Delete old message if it exists
-        old_msg_id = self.sticky_cache.get(channel.id)
-        if old_msg_id:
-            try:
-                old_msg = await channel.fetch_message(old_msg_id)
-                await old_msg.delete()
-            except Exception:
-                pass
-
-        embed = discord.Embed(
-            title="How to use the LFG system",
-            description=(
-                "**Role Toggle**: You can use `!lfg-role` in <#1310689512615051345> to add/remove the role at any time!\n\n"
-                "To post an LFG message, use the following command: `!lfg <lobby_id> <notes>`\n"
-                "> **Lobby ID**: Must be numerical, no alphabetical characters.\n"
-                "> **Notes**: Describe what you are looking for like casual or competitive matches!\n"
-            ),
-            color=discord.Color.blue()
-        )
+        guild_config = self.config.guild(channel.guild)
         
-        try:
-            new_msg = await channel.send(embed=embed)
-            self.sticky_cache[channel.id] = new_msg.id
-        except Exception:
-            if channel.id in self.active_sticky_channels:
-                self.active_sticky_channels.remove(channel.id)
+        async with guild_config.sticky_cache() as cache:
+            # Delete old message if it exists
+            old_msg_id = cache.get(str(channel.id))
+            if old_msg_id:
+                try:
+                    old_msg = await channel.fetch_message(old_msg_id)
+                    await old_msg.delete()
+                except Exception:
+                    pass
+
+            embed = discord.Embed(
+                title="How to use the LFG system",
+                description=(
+                    "**Role Toggle**: You can use `!lfg-role` in <#1310689512615051345> to add/remove the role at any time!\n\n"
+                    "To post an LFG message, use the following command: `!lfg <lobby_id> <notes>`\n"
+                    "> **Lobby ID**: Must be numerical, no alphabetical characters.\n"
+                    "> **Notes**: Describe what you are looking for like casual or competitive matches!\n"
+                ),
+                color=discord.Color.blue()
+            )
+            
+            try:
+                new_msg = await channel.send(embed=embed)
+                cache[str(channel.id)] = new_msg.id
+            except Exception:
+                async with guild_config.active_sticky_channels() as active:
+                    if channel.id in active:
+                        active.remove(channel.id)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        if message.author.bot or not message.guild:
+        if not message.guild:
             return
         
-        if message.channel.id not in self.active_sticky_channels:
+        guild_config = self.config.guild(message.guild)
+        active_channels = await guild_config.active_sticky_channels()
+        
+        if message.channel.id not in active_channels:
             return
 
         # Don't trigger on our own sticky message
-        if message.id == self.sticky_cache.get(message.channel.id):
-            return
+        if message.author == self.bot.user:
+            if message.embeds and message.embeds[0].title == "How to use the LFG system":
+                return
             
         await self._handle_sticky(message.channel)
 
@@ -152,40 +165,48 @@ class LFG(commands.Cog):
             except discord.Forbidden:
                 await ctx.send("I do not have permission to add that role.")
 
-    @commands.command(name="toggle-sticky")
+    @commands.command(name="sticky-toggle", aliases=["toggle-sticky"])
     @commands.guild_only()
-    async def toggle_sticky(self, ctx: commands.Context):
+    async def sticky_toggle(self, ctx: commands.Context):
         """
         Toggle the sticky info message in the current channel.
         """
-        if not any(role.id == self.TEST_ROLE_ID for role in ctx.author.roles):
+        # Maintain existing permission logic but add admin as fallback
+        has_test_role = any(role.id == self.TEST_ROLE_ID for role in ctx.author.roles)
+        is_admin = ctx.author.guild_permissions.administrator
+        
+        if not (has_test_role or is_admin):
             return await ctx.send("You do not have permission to use this command.", delete_after=10)
 
         channel_id = ctx.channel.id
+        guild_config = self.config.guild(ctx.guild)
         
-        if channel_id in self.active_sticky_channels:
-            # Disable sticky
-            self.active_sticky_channels.remove(channel_id)
-            
-            # Cleanup last message
-            old_msg_id = self.sticky_cache.pop(channel_id, None)
-            if old_msg_id:
-                try:
-                    old_msg = await ctx.channel.fetch_message(old_msg_id)
-                    await old_msg.delete()
-                except Exception:
-                    pass
-            
-            await ctx.send("Sticky message disabled in this channel.", delete_after=10)
-        else:
-            # Enable sticky
-            self.active_sticky_channels.append(channel_id)
-            await self._handle_sticky(ctx.channel)
-            await ctx.send(f"Sticky message enabled in {ctx.channel.mention}.", delete_after=10)
+        async with guild_config.active_sticky_channels() as active:
+            if channel_id in active:
+                # Disable sticky
+                active.remove(channel_id)
+                
+                # Cleanup last message
+                async with guild_config.sticky_cache() as cache:
+                    old_msg_id = cache.pop(str(channel_id), None)
+                    if old_msg_id:
+                        try:
+                            old_msg = await ctx.channel.fetch_message(old_msg_id)
+                            await old_msg.delete()
+                        except Exception:
+                            pass
+                
+                await ctx.send("Sticky message disabled in this channel.", delete_after=10)
+            else:
+                # Enable sticky
+                active.append(channel_id)
+                await self._handle_sticky(ctx.channel)
+                await ctx.send(f"Sticky message enabled in {ctx.channel.mention}.", delete_after=10)
 
     @lfg.error
     @testlfg.error
     @lfg_role.error
+    @sticky_toggle.error
     async def lfg_error(self, ctx, error):
         if isinstance(error, commands.CommandOnCooldown):
             await ctx.send(f"You are on cooldown. Try again in {error.retry_after:.0f} seconds.", delete_after=10)
