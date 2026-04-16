@@ -43,7 +43,7 @@ class LFG(commands.Cog):
                     "**Role Toggle**: You can use `!lfg-role` in <#1310689512615051345> to add/remove the role at any time!\n\n"
                     "To post an LFG message, use the following command: `!lfg <lobby_id> <notes>`\n"
                     "> **Lobby ID**: Must be numerical, no alphabetical characters.\n"
-                    "> **Notes**: Describe what you are looking for like casual or competitive matches!\n"
+                    "> **Notes**: (Optional) Describe what you are looking for like casual or competitive matches!\n"
                 ),
                 color=discord.Color.blue()
             )
@@ -74,8 +74,9 @@ class LFG(commands.Cog):
             
         await self._handle_sticky(message.channel)
 
-    async def _process_lfg(self, ctx: commands.Context, channel_id: int, lobby_id: str, notes: str):
+    async def _process_lfg(self, ctx: commands.Context, channel_id: int, lobby_id: str, notes: str = None):
         if ctx.channel.id != 1310689512615051345:
+            ctx.command.reset_cooldown(ctx)
             return await ctx.send("This command can only be used in <#1310689512615051345>.", delete_after=10)
 
         if not lobby_id.isdigit():
@@ -83,11 +84,13 @@ class LFG(commands.Cog):
             return await ctx.send("The Lobby ID must contain only numerical characters.", delete_after=10)
 
         # Sanitize notes: remove masked links and raw URLs
-        notes = re.sub(r"\[([^\]]+)\]\(https?://[^\s\)]+\)", r"\1", notes)
-        notes = re.sub(r"https?://[^\s]+", "", notes)
+        if notes:
+            notes = re.sub(r"\[([^\]]+)\]\(https?://[^\s\)]+\)", r"\1", notes)
+            notes = re.sub(r"https?://[^\s]+", "", notes)
 
         role = ctx.guild.get_role(self.LFG_ROLE_ID)
         if not role:
+            ctx.command.reset_cooldown(ctx)
             return await ctx.send("LFG Role not found. Please contact an administrator.")
 
         title = "Euuuuuugh!" if random.randint(1, 1000) == 1 else "Looking For Group"
@@ -106,6 +109,7 @@ class LFG(commands.Cog):
 
         lfg_channel = ctx.guild.get_channel(1284536580941287598)
         if not lfg_channel:
+            ctx.command.reset_cooldown(ctx)
             return await ctx.send("LFG channel not found. Please contact an administrator.")
 
         await lfg_channel.send(
@@ -122,7 +126,7 @@ class LFG(commands.Cog):
     @commands.command()
     @commands.guild_only()
     @commands.cooldown(1, 60, commands.BucketType.user)
-    async def lfg(self, ctx: commands.Context, lobby_id: str, *, notes: str):
+    async def lfg(self, ctx: commands.Context, lobby_id: str, *, notes: str = None):
         """
         Post an LFG message.
         
@@ -134,12 +138,13 @@ class LFG(commands.Cog):
     @commands.command()
     @commands.guild_only()
     @commands.cooldown(1, 60, commands.BucketType.user)
-    async def testlfg(self, ctx: commands.Context, lobby_id: str, *, notes: str):
+    async def testlfg(self, ctx: commands.Context, lobby_id: str, *, notes: str = None):
         """
         Test LFG command. 
         Only usable by specific test role.
         """
         if not any(role.id == self.TEST_ROLE_ID for role in ctx.author.roles):
+            ctx.command.reset_cooldown(ctx)
             return await ctx.send("You do not have permission to use this test command.", delete_after=10)
         
         await self._process_lfg(ctx, self.TEST_CHANNEL_ID, lobby_id, notes)
@@ -215,7 +220,9 @@ class LFG(commands.Cog):
         if isinstance(error, commands.CommandOnCooldown):
             await ctx.send(f"You are on cooldown. Try again in {error.retry_after:.0f} seconds.", delete_after=10)
         elif isinstance(error, commands.MissingRequiredArgument):
+            ctx.command.reset_cooldown(ctx)
             await ctx.send(f"Incorrect syntax. Use `{ctx.prefix}lfg <lobby_id> <notes>`", delete_after=10)
         else:
+            ctx.command.reset_cooldown(ctx)
             # Log other errors
             raise error
