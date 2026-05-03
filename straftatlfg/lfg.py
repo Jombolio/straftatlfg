@@ -284,6 +284,50 @@ class LFG(commands.Cog):
         )
         await ctx.send(embed=embed)
 
+    @commands.command(name="faqhelp")
+    @commands.guild_only()
+    async def faqhelp(self, ctx: commands.Context):
+        """
+        Shows a comprehensive list of FAQ commands available.
+        """
+        prefix = ctx.clean_prefix
+        embed = discord.Embed(
+            title="FAQ System Help",
+            description="Here are all the available FAQ commands:",
+            color=discord.Color.blue()
+        )
+        
+        embed.add_field(
+            name="User Commands",
+            value=(
+                f"`{prefix}faq <name>`\nRetrieves and outputs an FAQ response.\n\n"
+                f"`{prefix}faqlist`\nLists all currently available FAQs."
+            ),
+            inline=False
+        )
+        
+        embed.add_field(
+            name="Admin Commands",
+            value=(
+                f"`{prefix}faqnew <name> <content>`\nCreates a new FAQ response. You can use markdown codeblocks to ensure headings and other formatting are preserved!\n\n"
+                f"`{prefix}faqdel <name>`\nDeletes an existing FAQ response."
+            ),
+            inline=False
+        )
+        
+        try:
+            await ctx.author.send(embed=embed)
+            try:
+                await ctx.message.add_reaction("✅")
+            except discord.DiscordException:
+                pass
+        except discord.Forbidden:
+            await ctx.send(
+                f"{ctx.author.mention}, I couldn't send you a DM with the help menu. "
+                "Please check your privacy settings and ensure DMs from server members are enabled.",
+                delete_after=15
+            )
+
     @lfg.error
     @testlfg.error
     @lfg_role.error
