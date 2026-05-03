@@ -4,6 +4,7 @@ import discord
 import asyncio
 from redbot.core import commands, Config, checks
 from redbot.core.bot import Red
+from redbot.core.utils.menus import menu, DEFAULT_CONTROLS
 
 class LFG(commands.Cog):
     """
@@ -290,23 +291,53 @@ class LFG(commands.Cog):
         if not faqs:
             return await ctx.send("No FAQs have been set up yet.", delete_after=10)
             
-        embed = discord.Embed(
+        embeds = []
+        current_embed = discord.Embed(
             title="Available FAQs",
             description="Here are the currently available FAQs and their responses:",
             color=discord.Color.blue()
         )
+        current_field_count = 0
+        current_char_count = len(current_embed.title) + len(current_embed.description)
         
         for name, content in faqs.items():
             # Discord embed field values are limited to 1024 characters
             display_content = content if len(content) <= 1000 else content[:1000] + "..."
-            embed.add_field(name=f"`{name}`", value=display_content, inline=False)
+            field_name = f"`{name}`"
+            field_len = len(field_name) + len(display_content)
+            
+            # Check limits (max 10 fields per page or ~5500 chars to be safe)
+            if current_field_count >= 10 or current_char_count + field_len > 5500:
+                embeds.append(current_embed)
+                current_embed = discord.Embed(
+                    title="Available FAQs (Cont.)",
+                    color=discord.Color.blue()
+                )
+                current_field_count = 0
+                current_char_count = len(current_embed.title)
+                
+            current_embed.add_field(name=field_name, value=display_content, inline=False)
+            current_field_count += 1
+            current_char_count += field_len
+            
+        if current_field_count > 0:
+            embeds.append(current_embed)
+            
+        if len(embeds) > 1:
+            for i, emb in enumerate(embeds):
+                emb.set_footer(text=f"Page {i+1} of {len(embeds)}")
             
         try:
-            await ctx.author.send(embed=embed)
-            try:
-                await ctx.message.add_reaction("✅")
-            except discord.DiscordException:
-                pass
+            msg = await ctx.author.send(embed=embeds[0])
+            if ctx.guild:
+                try:
+                    await ctx.message.add_reaction("✅")
+                except discord.DiscordException:
+                    pass
+            
+            if len(embeds) > 1:
+                await menu(ctx, embeds, DEFAULT_CONTROLS, message=msg)
+                
         except discord.Forbidden:
             await ctx.send(
                 f"{ctx.author.mention}, I couldn't send you a DM with the FAQ list. "
