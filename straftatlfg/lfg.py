@@ -20,7 +20,8 @@ class LFG(commands.Cog):
         self.config = Config.get_conf(self, identifier=2736452831, force_registration=True)
         default_guild = {
             "active_sticky_channels": [],
-            "sticky_cache": {}  # channel_id (str): message_id (int)
+            "sticky_cache": {},  # channel_id (str): message_id (int)
+            "faqs": {}
         }
         self.config.register_guild(**default_guild)
 
@@ -212,10 +213,84 @@ class LFG(commands.Cog):
                 await self._handle_sticky(ctx.channel)
                 await ctx.send(f"Sticky message enabled in {ctx.channel.mention}.", delete_after=10)
 
+    @commands.command()
+    @commands.guild_only()
+    async def faq(self, ctx: commands.Context, *, name: str):
+        """
+        Get an FAQ response.
+        """
+        faqs = await self.config.guild(ctx.guild).faqs()
+        name = name.lower()
+        if name in faqs:
+            await ctx.send(faqs[name])
+        else:
+            await ctx.send(f"FAQ `{name}` not found.", delete_after=10)
+
+    @commands.command(name="faqnew", aliases=["addfaq"])
+    @commands.guild_only()
+    @checks.admin_or_permissions(administrator=True)
+    async def faqnew(self, ctx: commands.Context, name: str, *, content: str):
+        """
+        Create a new FAQ response.
+        
+        Example:
+        [p]faqnew test
+        ```
+        # What is this command?
+        This is a test.
+        ```
+        """
+        match = re.search(r"```[a-zA-Z]*\n?(.*?)```", content, re.DOTALL)
+        if match:
+            faq_content = match.group(1).strip()
+        else:
+            faq_content = content.strip()
+            
+        async with self.config.guild(ctx.guild).faqs() as faqs:
+            faqs[name.lower()] = faq_content
+            
+        await ctx.send(f"FAQ `{name}` added successfully.", delete_after=10)
+
+    @commands.command(name="faqdel", aliases=["delfaq"])
+    @commands.guild_only()
+    @checks.admin_or_permissions(administrator=True)
+    async def faqdel(self, ctx: commands.Context, *, name: str):
+        """
+        Delete an FAQ response.
+        """
+        async with self.config.guild(ctx.guild).faqs() as faqs:
+            name = name.lower()
+            if name in faqs:
+                del faqs[name]
+                await ctx.send(f"FAQ `{name}` deleted.", delete_after=10)
+            else:
+                await ctx.send(f"FAQ `{name}` not found.", delete_after=10)
+                
+    @commands.command(name="faqlist", aliases=["faqs"])
+    @commands.guild_only()
+    async def faqlist(self, ctx: commands.Context):
+        """
+        List all available FAQs.
+        """
+        faqs = await self.config.guild(ctx.guild).faqs()
+        if not faqs:
+            return await ctx.send("No FAQs have been set up yet.", delete_after=10)
+            
+        faq_list = ", ".join(f"`{name}`" for name in faqs.keys())
+        embed = discord.Embed(
+            title="Available FAQs",
+            description=faq_list,
+            color=discord.Color.blue()
+        )
+        await ctx.send(embed=embed)
+
     @lfg.error
     @testlfg.error
     @lfg_role.error
     @sticky_toggle.error
+    @faq.error
+    @faqnew.error
+    @faqdel.error
     async def lfg_error(self, ctx, error):
         if isinstance(error, commands.CommandOnCooldown):
             await ctx.send(f"You are on cooldown. Try again in {error.retry_after:.0f} seconds.", delete_after=10)
