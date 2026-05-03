@@ -214,12 +214,19 @@ class LFG(commands.Cog):
                 await ctx.send(f"Sticky message enabled in {ctx.channel.mention}.", delete_after=10)
 
     @commands.command()
-    @commands.guild_only()
     async def faq(self, ctx: commands.Context, *, name: str):
         """
         Get an FAQ response.
         """
-        faqs = await self.config.guild(ctx.guild).faqs()
+        guild = ctx.guild
+        if not guild:
+            channel = self.bot.get_channel(self.LFG_CHANNEL_ID)
+            if channel:
+                guild = channel.guild
+            if not guild:
+                return await ctx.send("Could not determine the server. Please run this command in the server.")
+                
+        faqs = await self.config.guild(guild).faqs()
         name = name.lower()
         if name in faqs:
             await ctx.send(faqs[name])
@@ -267,25 +274,47 @@ class LFG(commands.Cog):
                 await ctx.send(f"FAQ `{name}` not found.", delete_after=10)
                 
     @commands.command(name="faqlist", aliases=["faqs"])
-    @commands.guild_only()
     async def faqlist(self, ctx: commands.Context):
         """
-        List all available FAQs.
+        List all available FAQs and their contents.
         """
-        faqs = await self.config.guild(ctx.guild).faqs()
+        guild = ctx.guild
+        if not guild:
+            channel = self.bot.get_channel(self.LFG_CHANNEL_ID)
+            if channel:
+                guild = channel.guild
+            if not guild:
+                return await ctx.send("Could not determine the server. Please run this command in the server.")
+                
+        faqs = await self.config.guild(guild).faqs()
         if not faqs:
             return await ctx.send("No FAQs have been set up yet.", delete_after=10)
             
-        faq_list = ", ".join(f"`{name}`" for name in faqs.keys())
         embed = discord.Embed(
             title="Available FAQs",
-            description=faq_list,
+            description="Here are the currently available FAQs and their responses:",
             color=discord.Color.blue()
         )
-        await ctx.send(embed=embed)
+        
+        for name, content in faqs.items():
+            # Discord embed field values are limited to 1024 characters
+            display_content = content if len(content) <= 1000 else content[:1000] + "..."
+            embed.add_field(name=f"`{name}`", value=display_content, inline=False)
+            
+        try:
+            await ctx.author.send(embed=embed)
+            try:
+                await ctx.message.add_reaction("✅")
+            except discord.DiscordException:
+                pass
+        except discord.Forbidden:
+            await ctx.send(
+                f"{ctx.author.mention}, I couldn't send you a DM with the FAQ list. "
+                "Please check your privacy settings and ensure DMs from server members are enabled.",
+                delete_after=15
+            )
 
     @commands.command(name="faqhelp")
-    @commands.guild_only()
     async def faqhelp(self, ctx: commands.Context):
         """
         Shows a comprehensive list of FAQ commands available.
