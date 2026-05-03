@@ -288,9 +288,6 @@ class LFG(commands.Cog):
     @testlfg.error
     @lfg_role.error
     @sticky_toggle.error
-    @faq.error
-    @faqnew.error
-    @faqdel.error
     async def lfg_error(self, ctx, error):
         if isinstance(error, commands.CommandOnCooldown):
             await ctx.send(f"You are on cooldown. Try again in {error.retry_after:.0f} seconds.", delete_after=10)
