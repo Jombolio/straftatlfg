@@ -215,6 +215,7 @@ class LFG(commands.Cog):
                 await ctx.send(f"Sticky message enabled in {ctx.channel.mention}.", delete_after=10)
 
     @commands.command()
+    @commands.cooldown(1, 30, commands.BucketType.user)
     async def faq(self, ctx: commands.Context, *, name: str):
         """
         Get an FAQ response.
@@ -230,7 +231,7 @@ class LFG(commands.Cog):
         faqs = await self.config.guild(guild).faqs()
         name = name.lower()
         if name in faqs:
-            await ctx.send(faqs[name])
+            await ctx.send(faqs[name], delete_after=1800)
         else:
             await ctx.send(f"FAQ `{name}` not found.", delete_after=10)
 
@@ -275,6 +276,7 @@ class LFG(commands.Cog):
                 await ctx.send(f"FAQ `{name}` not found.", delete_after=10)
                 
     @commands.command(name="faqlist", aliases=["faqs"])
+    @commands.cooldown(1, 30, commands.BucketType.user)
     async def faqlist(self, ctx: commands.Context):
         """
         List all available FAQs and their contents.
@@ -346,6 +348,7 @@ class LFG(commands.Cog):
             )
 
     @commands.command(name="faqhelp")
+    @commands.cooldown(1, 30, commands.BucketType.user)
     async def faqhelp(self, ctx: commands.Context):
         """
         Shows a comprehensive list of FAQ commands available.
@@ -392,6 +395,9 @@ class LFG(commands.Cog):
     @testlfg.error
     @lfg_role.error
     @sticky_toggle.error
+    @faq.error
+    @faqlist.error
+    @faqhelp.error
     async def lfg_error(self, ctx, error):
         if isinstance(error, commands.CommandOnCooldown):
             await ctx.send(f"You are on cooldown. Try again in {error.retry_after:.0f} seconds.", delete_after=10)
