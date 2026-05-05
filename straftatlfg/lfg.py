@@ -220,6 +220,9 @@ class LFG(commands.Cog):
         """
         Get an FAQ response.
         """
+        if ctx.channel.id in [1409306775445831751, 1286747739270545500]:
+            ctx.command.reset_cooldown(ctx)
+            return
         guild = ctx.guild
         if not guild:
             channel = self.bot.get_channel(self.LFG_CHANNEL_ID)
@@ -249,6 +252,8 @@ class LFG(commands.Cog):
         This is a test.
         ```
         """
+        if ctx.channel.id in [1409306775445831751, 1286747739270545500]:
+            return
         match = re.search(r"```[a-zA-Z]*\n?(.*?)```", content, re.DOTALL)
         if match:
             faq_content = match.group(1).strip()
@@ -267,6 +272,8 @@ class LFG(commands.Cog):
         """
         Delete an FAQ response.
         """
+        if ctx.channel.id in [1409306775445831751, 1286747739270545500]:
+            return
         async with self.config.guild(ctx.guild).faqs() as faqs:
             name = name.lower()
             if name in faqs:
@@ -281,6 +288,9 @@ class LFG(commands.Cog):
         """
         List all available FAQs and their contents.
         """
+        if ctx.channel.id in [1409306775445831751, 1286747739270545500]:
+            ctx.command.reset_cooldown(ctx)
+            return
         guild = ctx.guild
         if not guild:
             channel = self.bot.get_channel(self.LFG_CHANNEL_ID)
@@ -353,6 +363,9 @@ class LFG(commands.Cog):
         """
         Shows a comprehensive list of FAQ commands available.
         """
+        if ctx.channel.id in [1409306775445831751, 1286747739270545500]:
+            ctx.command.reset_cooldown(ctx)
+            return
         prefix = ctx.clean_prefix
         embed = discord.Embed(
             title="FAQ System Help",
