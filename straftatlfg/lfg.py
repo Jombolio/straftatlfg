@@ -16,15 +16,32 @@ class LFG(commands.Cog):
     TEST_ROLE_ID = 1270478869610238084
     TEST_CHANNEL_ID = 1269794533923754089
 
+    # Region reaction roles, in display order: (emoji, label, role_id)
+    REGION_ROLES = [
+        ("🇷🇺", "CIS / СНГ", 1518155782116605976),
+        ("🇪🇺", "EU", 1518157363960614992),
+        ("🇺🇸", "NA", 1518155772230369301),
+        ("🇧🇷", "LATAM", 1518155781772546108),
+        ("🇯🇵", "ASIA", 1518155783559319552),
+        ("🇦🇺", "OCE", 1518157364971180122),
+        ("🇿🇦", "AFRICA", 1518155772964376647),
+        ("🇸🇦", "ME", 1518157364694618215),
+    ]
+
     def __init__(self, bot: Red):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=2736452831, force_registration=True)
         default_guild = {
             "active_sticky_channels": [],
             "sticky_cache": {},  # channel_id (str): message_id (int)
-            "faqs": {}
+            "faqs": {},
+            "region_message_ids": []  # message IDs of posted region reaction-role embeds
         }
         self.config.register_guild(**default_guild)
+
+    def _region_role_map(self):
+        """Return a dict mapping region emoji -> role_id."""
+        return {emoji: role_id for emoji, _label, role_id in self.REGION_ROLES}
 
     async def _handle_sticky(self, channel: discord.TextChannel):
         guild_config = self.config.guild(channel.guild)
@@ -403,6 +420,135 @@ class LFG(commands.Cog):
                 "Please check your privacy settings and ensure DMs from server members are enabled.",
                 delete_after=15
             )
+
+    @commands.command(name="lfg-region")
+    @commands.guild_only()
+    @checks.admin_or_permissions(administrator=True)
+    async def lfg_region(self, ctx: commands.Context):
+        """
+        Post the interactive region reaction-role message.
+
+        Users react to assign themselves a region role for matchmaking.
+        Only one region can be selected at a time.
+        """
+        lines = [
+            "React below to assign yourself a **region role** so others can find players near them.\n",
+            "> You can only have **one** region at a time — picking a new one replaces the old.",
+            "> Remove your reaction to clear your region.\n",
+        ]
+        lines.extend(f"{emoji} — <@&{role_id}>" for emoji, _label, role_id in self.REGION_ROLES)
+
+        embed = discord.Embed(
+            title="Select Your Region",
+            description="\n".join(lines),
+            color=discord.Color.blue()
+        )
+
+        message = await ctx.send(
+            embed=embed,
+            allowed_mentions=discord.AllowedMentions.none()
+        )
+
+        for emoji, _label, _role_id in self.REGION_ROLES:
+            try:
+                await message.add_reaction(emoji)
+            except discord.DiscordException:
+                pass
+
+        async with self.config.guild(ctx.guild).region_message_ids() as message_ids:
+            message_ids.append(message.id)
+
+        try:
+            await ctx.message.add_reaction("✅")
+        except discord.DiscordException:
+            pass
+
+    @commands.Cog.listener()
+    async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
+        if payload.guild_id is None or payload.user_id == self.bot.user.id:
+            return
+
+        role_map = self._region_role_map()
+        emoji = str(payload.emoji)
+        if emoji not in role_map:
+            return
+
+        message_ids = await self.config.guild_from_id(payload.guild_id).region_message_ids()
+        if payload.message_id not in message_ids:
+            return
+
+        guild = self.bot.get_guild(payload.guild_id)
+        if guild is None:
+            return
+
+        member = payload.member or guild.get_member(payload.user_id)
+        if member is None or member.bot:
+            return
+
+        # Add the selected region role.
+        role = guild.get_role(role_map[emoji])
+        if role is not None and role not in member.roles:
+            try:
+                await member.add_roles(role, reason="LFG region reaction role")
+            except discord.Forbidden:
+                pass
+
+        # Enforce single selection: strip every other region role...
+        other_roles = [
+            guild.get_role(role_id)
+            for other_emoji, _label, role_id in self.REGION_ROLES
+            if other_emoji != emoji
+        ]
+        other_roles = [r for r in other_roles if r is not None and r in member.roles]
+        if other_roles:
+            try:
+                await member.remove_roles(*other_roles, reason="LFG region reaction role (single selection)")
+            except discord.Forbidden:
+                pass
+
+        # ...and clear this member's other region reactions from the message.
+        channel = guild.get_channel(payload.channel_id)
+        if channel is not None:
+            try:
+                message = await channel.fetch_message(payload.message_id)
+            except discord.DiscordException:
+                message = None
+            if message is not None:
+                for other_emoji, _label, _role_id in self.REGION_ROLES:
+                    if other_emoji != emoji:
+                        try:
+                            await message.remove_reaction(other_emoji, member)
+                        except discord.DiscordException:
+                            pass
+
+    @commands.Cog.listener()
+    async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent):
+        if payload.guild_id is None or payload.user_id == self.bot.user.id:
+            return
+
+        role_map = self._region_role_map()
+        emoji = str(payload.emoji)
+        if emoji not in role_map:
+            return
+
+        message_ids = await self.config.guild_from_id(payload.guild_id).region_message_ids()
+        if payload.message_id not in message_ids:
+            return
+
+        guild = self.bot.get_guild(payload.guild_id)
+        if guild is None:
+            return
+
+        member = guild.get_member(payload.user_id)
+        if member is None or member.bot:
+            return
+
+        role = guild.get_role(role_map[emoji])
+        if role is not None and role in member.roles:
+            try:
+                await member.remove_roles(role, reason="LFG region reaction role removed")
+            except discord.Forbidden:
+                pass
 
     @lfg.error
     @testlfg.error
