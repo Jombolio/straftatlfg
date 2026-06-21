@@ -18,14 +18,14 @@ class LFG(commands.Cog):
 
     # Region reaction roles, in display order: (emoji, label, role_id)
     REGION_ROLES = [
-        ("🇷🇺", "CIS / СНГ", 1518155782116605976),
-        ("🇪🇺", "EU", 1518157363960614992),
-        ("🇺🇸", "NA", 1518155772230369301),
-        ("🇧🇷", "LATAM", 1518155781772546108),
-        ("🇯🇵", "ASIA", 1518155783559319552),
-        ("🇦🇺", "OCE", 1518157364971180122),
-        ("🇿🇦", "AFRICA", 1518155772964376647),
-        ("🇸🇦", "ME", 1518157364694618215),
+        ("1️⃣", "CIS / СНГ", 1518155782116605976),
+        ("2️⃣", "EU", 1518157363960614992),
+        ("3️⃣", "NA", 1518155772230369301),
+        ("4️⃣", "LATAM", 1518155781772546108),
+        ("5️⃣", "ASIA", 1518155783559319552),
+        ("6️⃣", "OCE", 1518157364971180122),
+        ("7️⃣", "AFRICA", 1518155772964376647),
+        ("8️⃣", "ME", 1518157364694618215),
     ]
 
     def __init__(self, bot: Red):
@@ -433,10 +433,10 @@ class LFG(commands.Cog):
         """
         lines = [
             "React below to assign yourself a **region role** so others can find players near them.\n",
-            "> You can only have **one** region at a time — picking a new one replaces the old.",
+            "> You can only have **one** region at a time. Picking a new one replaces the old.",
             "> Remove your reaction to clear your region.\n",
         ]
-        lines.extend(f"{emoji} — <@&{role_id}>" for emoji, _label, role_id in self.REGION_ROLES)
+        lines.extend(f"{emoji} <@&{role_id}>" for emoji, _label, role_id in self.REGION_ROLES)
 
         embed = discord.Embed(
             title="Select Your Region",
