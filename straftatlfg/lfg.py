@@ -246,13 +246,15 @@ class LFG(commands.Cog):
             if channel:
                 guild = channel.guild
             if not guild:
+                ctx.command.reset_cooldown(ctx)
                 return await ctx.send("Could not determine the server. Please run this command in the server.")
-                
+
         faqs = await self.config.guild(guild).faqs()
         name = name.lower()
         if name in faqs:
-            await ctx.send(faqs[name], delete_after=1800)
+            await ctx.send(faqs[name])
         else:
+            ctx.command.reset_cooldown(ctx)
             await ctx.send(f"FAQ `{name}` not found.", delete_after=10)
 
     @commands.command(name="faqnew", aliases=["addfaq"])
