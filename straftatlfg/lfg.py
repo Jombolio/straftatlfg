@@ -252,7 +252,7 @@ class LFG(commands.Cog):
         faqs = await self.config.guild(guild).faqs()
         name = name.lower()
         if name in faqs:
-            await ctx.send(faqs[name])
+            await ctx.send(faqs[name], delete_after=86400)
         else:
             ctx.command.reset_cooldown(ctx)
             await ctx.send(f"FAQ `{name}` not found.", delete_after=10)
