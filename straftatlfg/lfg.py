@@ -51,15 +51,17 @@ class LFGPostModal(discord.ui.Modal, title="Post an LFG"):
             required=True,
         ),
     )
-    modded_field = discord.ui.Label(
-        text="Modded Lobby",
+    randomizer_field = discord.ui.Label(
+        text="Weapon Randomizer",
+        description="Optional — leave empty to skip",
         component=discord.ui.Select(
-            placeholder="Is the lobby running mods?",
+            placeholder="Fully Random, Custom, or No?",
             options=[
-                discord.SelectOption(label="Yes"),
+                discord.SelectOption(label="Fully Random"),
+                discord.SelectOption(label="Custom"),
                 discord.SelectOption(label="No"),
             ],
-            required=True,
+            required=False,
         ),
     )
     notes_field = discord.ui.Label(
@@ -76,14 +78,18 @@ class LFGPostModal(discord.ui.Modal, title="Post an LFG"):
         self,
         cog,
         destination_id: int,
+        is_modded: bool,
         enforce_gate: bool,
         enforce_cooldown: bool,
         silent_ping: bool,
         optional_settings: Optional[Dict[str, Optional[str]]] = None,
     ):
-        super().__init__()
+        # Moddedness is derived from the invoking command (/modlfg vs /lfg),
+        # never asked in the form; the title tells the invoker which one opened.
+        super().__init__(title="Post a Modded LFG" if is_modded else "Post an LFG")
         self.cog = cog
         self.destination_id = destination_id
+        self.is_modded = is_modded
         self.enforce_gate = enforce_gate
         self.enforce_cooldown = enforce_cooldown
         self.silent_ping = silent_ping
@@ -776,11 +782,13 @@ class LFG(commands.Cog):
         try:
             max_players = modal.max_players_field.component.values[0]
             gamemode = modal.gamemode_field.component.values[0]
-            modded = modal.modded_field.component.values[0]
         except IndexError:
             return await interaction.response.send_message(
                 "A required selection is missing — please try again.", ephemeral=True
             )
+        # Optional select: untouched submits an empty values list.
+        randomizer_values = modal.randomizer_field.component.values
+        randomizer = randomizer_values[0] if randomizer_values else None
 
         # 2. Authoritative region re-check (the modal may have sat open across a
         #    role removal). A failed gate never consumes the cooldown.
@@ -794,9 +802,13 @@ class LFG(commands.Cog):
         settings: Dict[str, str] = {
             "Max Players": max_players,
             "Gamemode": gamemode,
-            "Modded Lobby": modded,
+            "Modded Lobby": "Yes" if modal.is_modded else "No",
         }
-        for name, value in modal.optional_settings.items():
+        optional = dict(modal.optional_settings)
+        if randomizer is not None:
+            # Fills the placeholder key in-place, preserving display order.
+            optional["Weapon Randomizer"] = randomizer
+        for name, value in optional.items():
             if value is not None:
                 settings[name] = value
 
@@ -873,18 +885,54 @@ class LFG(commands.Cog):
         lobby_type: Optional[str],
         friendly_fire: Optional[str],
         mid_match_joining: Optional[str],
-        weapon_randomizer: Optional[str],
         enemy_outlines: Optional[str],
     ) -> Dict[str, Optional[str]]:
-        """Map the slash command's optional options to embed display names."""
+        """Map the slash command's optional options to embed display names.
+
+        "Weapon Randomizer" is a None placeholder that holds its display
+        position; it is filled from the modal's optional select at submit time.
+        """
         return {
             "First To": str(first_to) if first_to is not None else None,
             "Lobby Type": lobby_type,
             "Friendly Fire": friendly_fire,
             "Mid-Match Joining": mid_match_joining,
-            "Weapon Randomizer": weapon_randomizer,
+            "Weapon Randomizer": None,
             "Enemy Outlines": enemy_outlines,
         }
+
+    async def _launch_lfg_modal(
+        self,
+        interaction: discord.Interaction,
+        *,
+        destination_id: int,
+        is_modded: bool,
+        enforce_gate: bool,
+        enforce_cooldown: bool,
+        silent_ping: bool,
+        optional_settings: Dict[str, Optional[str]],
+    ):
+        """Shared front door for the /lfg command family: region gate ->
+        cooldown peek -> modal. All feedback is ephemeral."""
+        if enforce_gate and self.get_member_region(interaction.user) is None:
+            return await interaction.response.send_message(self._region_gate_message(), ephemeral=True)
+        if enforce_cooldown:
+            remaining = await self.check_cooldown(interaction.user)
+            if remaining > 0:
+                return await interaction.response.send_message(
+                    f"You can post again in {max(1, round(remaining))}s.", ephemeral=True
+                )
+        await interaction.response.send_modal(
+            LFGPostModal(
+                self,
+                destination_id=destination_id,
+                is_modded=is_modded,
+                enforce_gate=enforce_gate,
+                enforce_cooldown=enforce_cooldown,
+                silent_ping=silent_ping,
+                optional_settings=optional_settings,
+            )
+        )
 
     @app_commands.command(name="lfg", description="Post an LFG to #new-lfg")
     @app_commands.guild_only()
@@ -893,7 +941,6 @@ class LFG(commands.Cog):
         lobby_type="Who can join the lobby",
         friendly_fire="Friendly fire setting",
         mid_match_joining="Allow joining mid-match",
-        weapon_randomizer="Weapon randomizer mode",
         enemy_outlines="Enemy outlines setting",
     )
     async def slash_lfg(
@@ -903,32 +950,52 @@ class LFG(commands.Cog):
         lobby_type: Optional[Literal["Public", "Invite Only", "Private"]] = None,
         friendly_fire: Optional[Literal["Enabled", "Disabled"]] = None,
         mid_match_joining: Optional[Literal["Yes", "No"]] = None,
-        weapon_randomizer: Optional[Literal["Fully Random", "Custom", "No"]] = None,
         enemy_outlines: Optional[Literal["Enabled", "Disabled"]] = None,
     ):
-        """Region gate -> cooldown peek -> modal. All feedback is ephemeral.
-        The optional lobby settings live here as slash options (Discord enforces
-        the choices and the 1-50 range client-side); the modal carries the
-        mandatory fields, since modals cap at 5 components."""
-        if self.get_member_region(interaction.user) is None:
-            return await interaction.response.send_message(self._region_gate_message(), ephemeral=True)
-        remaining = await self.check_cooldown(interaction.user)
-        if remaining > 0:
-            return await interaction.response.send_message(
-                f"You can post again in {max(1, round(remaining))}s.", ephemeral=True
-            )
-        await interaction.response.send_modal(
-            LFGPostModal(
-                self,
-                destination_id=self.NEW_LFG_CHANNEL_ID,
-                enforce_gate=True,
-                enforce_cooldown=True,
-                silent_ping=False,
-                optional_settings=self._collect_optional_settings(
-                    first_to, lobby_type, friendly_fire,
-                    mid_match_joining, weapon_randomizer, enemy_outlines,
-                ),
-            )
+        """Vanilla LFG. The post is tagged Modded Lobby: No — moddedness is
+        derived from which command was used, never asked in the modal."""
+        await self._launch_lfg_modal(
+            interaction,
+            destination_id=self.NEW_LFG_CHANNEL_ID,
+            is_modded=False,
+            enforce_gate=True,
+            enforce_cooldown=True,
+            silent_ping=False,
+            optional_settings=self._collect_optional_settings(
+                first_to, lobby_type, friendly_fire, mid_match_joining, enemy_outlines,
+            ),
+        )
+
+    @app_commands.command(name="modlfg", description="Post a modded LFG to #new-lfg")
+    @app_commands.guild_only()
+    @app_commands.describe(
+        first_to="First to how many wins? (1-50)",
+        lobby_type="Who can join the lobby",
+        friendly_fire="Friendly fire setting",
+        mid_match_joining="Allow joining mid-match",
+        enemy_outlines="Enemy outlines setting",
+    )
+    async def slash_modlfg(
+        self,
+        interaction: discord.Interaction,
+        first_to: Optional[app_commands.Range[int, 1, 50]] = None,
+        lobby_type: Optional[Literal["Public", "Invite Only", "Private"]] = None,
+        friendly_fire: Optional[Literal["Enabled", "Disabled"]] = None,
+        mid_match_joining: Optional[Literal["Yes", "No"]] = None,
+        enemy_outlines: Optional[Literal["Enabled", "Disabled"]] = None,
+    ):
+        """Carbon copy of /lfg for modded lobbies: same modal, same gate, same
+        shared cooldown, same destination — the post is tagged Modded Lobby: Yes."""
+        await self._launch_lfg_modal(
+            interaction,
+            destination_id=self.NEW_LFG_CHANNEL_ID,
+            is_modded=True,
+            enforce_gate=True,
+            enforce_cooldown=True,
+            silent_ping=False,
+            optional_settings=self._collect_optional_settings(
+                first_to, lobby_type, friendly_fire, mid_match_joining, enemy_outlines,
+            ),
         )
 
     @app_commands.command(name="testlfg", description="Admin test of the LFG flow — posts to the log channel")
@@ -939,7 +1006,6 @@ class LFG(commands.Cog):
         lobby_type="Who can join the lobby",
         friendly_fire="Friendly fire setting",
         mid_match_joining="Allow joining mid-match",
-        weapon_randomizer="Weapon randomizer mode",
         enemy_outlines="Enemy outlines setting",
     )
     async def slash_testlfg(
@@ -949,28 +1015,61 @@ class LFG(commands.Cog):
         lobby_type: Optional[Literal["Public", "Invite Only", "Private"]] = None,
         friendly_fire: Optional[Literal["Enabled", "Disabled"]] = None,
         mid_match_joining: Optional[Literal["Yes", "No"]] = None,
-        weapon_randomizer: Optional[Literal["Fully Random", "Custom", "No"]] = None,
         enemy_outlines: Optional[Literal["Enabled", "Disabled"]] = None,
     ):
-        """Same modal and options as /lfg, but: admin-only, posts to the log
-        channel, no region gate, no cooldown, and the role mention renders
-        without notifying anyone."""
+        """Tester for /lfg: same modal and options, but admin-only, posts to the
+        log channel, no region gate, no cooldown, silent role mention."""
         if not interaction.user.guild_permissions.administrator:
             return await interaction.response.send_message(
                 "You need the Administrator permission to use this command.", ephemeral=True
             )
-        await interaction.response.send_modal(
-            LFGPostModal(
-                self,
-                destination_id=self.TEST_CHANNEL_ID,
-                enforce_gate=False,
-                enforce_cooldown=False,
-                silent_ping=True,
-                optional_settings=self._collect_optional_settings(
-                    first_to, lobby_type, friendly_fire,
-                    mid_match_joining, weapon_randomizer, enemy_outlines,
-                ),
+        await self._launch_lfg_modal(
+            interaction,
+            destination_id=self.TEST_CHANNEL_ID,
+            is_modded=False,
+            enforce_gate=False,
+            enforce_cooldown=False,
+            silent_ping=True,
+            optional_settings=self._collect_optional_settings(
+                first_to, lobby_type, friendly_fire, mid_match_joining, enemy_outlines,
+            ),
+        )
+
+    @app_commands.command(name="testmodlfg", description="Admin test of the modded LFG flow — posts to the log channel")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    @app_commands.describe(
+        first_to="First to how many wins? (1-50)",
+        lobby_type="Who can join the lobby",
+        friendly_fire="Friendly fire setting",
+        mid_match_joining="Allow joining mid-match",
+        enemy_outlines="Enemy outlines setting",
+    )
+    async def slash_testmodlfg(
+        self,
+        interaction: discord.Interaction,
+        first_to: Optional[app_commands.Range[int, 1, 50]] = None,
+        lobby_type: Optional[Literal["Public", "Invite Only", "Private"]] = None,
+        friendly_fire: Optional[Literal["Enabled", "Disabled"]] = None,
+        mid_match_joining: Optional[Literal["Yes", "No"]] = None,
+        enemy_outlines: Optional[Literal["Enabled", "Disabled"]] = None,
+    ):
+        """Tester for /modlfg: same modal and options, but admin-only, posts to
+        the log channel, no region gate, no cooldown, silent role mention."""
+        if not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message(
+                "You need the Administrator permission to use this command.", ephemeral=True
             )
+        await self._launch_lfg_modal(
+            interaction,
+            destination_id=self.TEST_CHANNEL_ID,
+            is_modded=True,
+            enforce_gate=False,
+            enforce_cooldown=False,
+            silent_ping=True,
+            optional_settings=self._collect_optional_settings(
+                first_to, lobby_type, friendly_fire, mid_match_joining, enemy_outlines,
+            ),
         )
 
     @app_commands.command(name="lfgpings", description="Toggle whether you get pinged for LFG posts")
