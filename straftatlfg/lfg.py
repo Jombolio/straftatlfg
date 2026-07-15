@@ -4,7 +4,7 @@ import discord
 import asyncio
 import logging
 import time
-from typing import Dict, Optional, Tuple
+from typing import Dict, Literal, Optional, Tuple
 from redbot.core import commands, Config, checks
 from redbot.core import app_commands
 from redbot.core.bot import Red
@@ -14,29 +14,82 @@ log = logging.getLogger("red.straftatlfg")
 
 
 class LFGPostModal(discord.ui.Modal, title="Post an LFG"):
-    """The interactive form behind /lfg and /testlfg (new system only)."""
+    """The interactive form behind /lfg and /testlfg (new system only).
 
-    lobby_id = discord.ui.TextInput(
-        label="Lobby ID",
-        placeholder="Numbers only, e.g. 12345",
-        max_length=10,
-        required=True,
+    Discord hard-caps modals at 5 top-level components, so the modal carries
+    the mandatory fields (+ notes). The optional lobby settings arrive as
+    slash-command options (already validated client-side by Discord) and are
+    threaded through via optional_settings. Selects in modals must be wrapped
+    in discord.ui.Label (dpy 2.6+ / Red 3.5.21+); a bare select gets rejected.
+    """
+
+    lobby_id_field = discord.ui.Label(
+        text="Lobby ID",
+        description="Numbers only, e.g. 12345",
+        component=discord.ui.TextInput(placeholder="12345", max_length=10, required=True),
     )
-    notes = discord.ui.TextInput(
-        label="Notes",
-        style=discord.TextStyle.paragraph,
-        placeholder="Casual? Competitive? Anything else!",
-        max_length=200,
-        required=False,
+    max_players_field = discord.ui.Label(
+        text="Max Players",
+        component=discord.ui.Select(
+            placeholder="How many players can join?",
+            options=[
+                discord.SelectOption(label="2"),
+                discord.SelectOption(label="3"),
+                discord.SelectOption(label="4"),
+            ],
+            required=True,
+        ),
+    )
+    gamemode_field = discord.ui.Label(
+        text="Gamemode",
+        component=discord.ui.Select(
+            placeholder="FFA or Teams?",
+            options=[
+                discord.SelectOption(label="FFA"),
+                discord.SelectOption(label="Teams"),
+            ],
+            required=True,
+        ),
+    )
+    modded_field = discord.ui.Label(
+        text="Modded Lobby",
+        component=discord.ui.Select(
+            placeholder="Is the lobby running mods?",
+            options=[
+                discord.SelectOption(label="Yes"),
+                discord.SelectOption(label="No"),
+            ],
+            required=True,
+        ),
+    )
+    notes_field = discord.ui.Label(
+        text="Notes",
+        description="Optional — casual? Competitive? Anything else!",
+        component=discord.ui.TextInput(
+            style=discord.TextStyle.paragraph,
+            max_length=200,
+            required=False,
+        ),
     )
 
-    def __init__(self, cog, destination_id: int, enforce_gate: bool, enforce_cooldown: bool, silent_ping: bool):
+    def __init__(
+        self,
+        cog,
+        destination_id: int,
+        enforce_gate: bool,
+        enforce_cooldown: bool,
+        silent_ping: bool,
+        optional_settings: Optional[Dict[str, Optional[str]]] = None,
+    ):
         super().__init__()
         self.cog = cog
         self.destination_id = destination_id
         self.enforce_gate = enforce_gate
         self.enforce_cooldown = enforce_cooldown
         self.silent_ping = silent_ping
+        # Display name -> value from the slash command's optional options;
+        # None means the invoker skipped that option.
+        self.optional_settings: Dict[str, Optional[str]] = optional_settings or {}
         # Set when this submission consumed the cooldown; cleared the moment the
         # post lands so a late failure can never refund a live post.
         self.committed_stamp: Optional[float] = None
@@ -661,8 +714,9 @@ class LFG(commands.Cog):
         lobby_id: str,
         notes: Optional[str],
         region: Optional[Tuple[str, str, int]] = None,
+        settings: Optional[Dict[str, str]] = None,
     ) -> discord.Embed:
-        """Same look as the legacy embed, plus an optional Region field."""
+        """Same look as the legacy embed, plus Region and lobby-settings fields."""
         title = "Euuuuuugh!" if random.randint(1, 1000) == 1 else "Looking For Group"
         color = discord.Color.green() if any(r.id == 1387554310832918528 for r in member.roles) else discord.Color.blue()
         embed = discord.Embed(title=title, color=color, description=notes)
@@ -670,6 +724,8 @@ class LFG(commands.Cog):
         embed.add_field(name="Host", value=member.mention, inline=True)
         if region is not None:
             embed.add_field(name="Region", value=f"{region[0]} {region[1]}", inline=True)
+        for name, value in (settings or {}).items():
+            embed.add_field(name=name, value=value, inline=True)
         embed.set_footer(text="Join the lobby using the ID above!", icon_url=member.display_avatar.url)
         return embed
 
@@ -709,11 +765,21 @@ class LFG(commands.Cog):
         """The ordering here is load-bearing — see REFACTOR_PLAN.md §4.4."""
         member = interaction.user
 
-        # 1. Validate lobby id (server-side; Discord has no numeric input type).
-        lobby = str(modal.lobby_id.value).strip()
+        # 1. Validate lobby id (server-side; Discord has no numeric input type)
+        #    and read the mandatory selects (Discord enforces required=True, so
+        #    exactly one value each; guard defensively anyway).
+        lobby = str(modal.lobby_id_field.component.value or "").strip()
         if not lobby.isdigit():
             return await interaction.response.send_message(
                 "The Lobby ID must contain only numbers.", ephemeral=True
+            )
+        try:
+            max_players = modal.max_players_field.component.values[0]
+            gamemode = modal.gamemode_field.component.values[0]
+            modded = modal.modded_field.component.values[0]
+        except IndexError:
+            return await interaction.response.send_message(
+                "A required selection is missing — please try again.", ephemeral=True
             )
 
         # 2. Authoritative region re-check (the modal may have sat open across a
@@ -722,8 +788,17 @@ class LFG(commands.Cog):
         if modal.enforce_gate and region is None:
             return await interaction.response.send_message(self._region_gate_message(), ephemeral=True)
 
-        # 3. Sanitize notes.
-        notes = self.sanitize_notes(modal.notes.value or None)
+        # 3. Sanitize notes; assemble the settings fields (mandatory first, then
+        #    whichever optional slash options the invoker actually set).
+        notes = self.sanitize_notes(modal.notes_field.component.value or None)
+        settings: Dict[str, str] = {
+            "Max Players": max_players,
+            "Gamemode": gamemode,
+            "Modded Lobby": modded,
+        }
+        for name, value in modal.optional_settings.items():
+            if value is not None:
+                settings[name] = value
 
         # 4-5. Cooldown: warm the cache from Config, then atomic check-and-stamp.
         if modal.enforce_cooldown:
@@ -752,7 +827,7 @@ class LFG(commands.Cog):
                 ephemeral=True,
             )
 
-        embed = self.build_lfg_embed(member, lobby, notes, region=region)
+        embed = self.build_lfg_embed(member, lobby, notes, region=region, settings=settings)
         if modal.silent_ping:
             # /testlfg: render the mention without notifying anyone.
             mentions = discord.AllowedMentions.none()
@@ -792,10 +867,49 @@ class LFG(commands.Cog):
         except discord.HTTPException:
             log.exception("Failed to send LFG confirmation followup")
 
+    @staticmethod
+    def _collect_optional_settings(
+        first_to: Optional[int],
+        lobby_type: Optional[str],
+        friendly_fire: Optional[str],
+        mid_match_joining: Optional[str],
+        weapon_randomizer: Optional[str],
+        enemy_outlines: Optional[str],
+    ) -> Dict[str, Optional[str]]:
+        """Map the slash command's optional options to embed display names."""
+        return {
+            "First To": str(first_to) if first_to is not None else None,
+            "Lobby Type": lobby_type,
+            "Friendly Fire": friendly_fire,
+            "Mid-Match Joining": mid_match_joining,
+            "Weapon Randomizer": weapon_randomizer,
+            "Enemy Outlines": enemy_outlines,
+        }
+
     @app_commands.command(name="lfg", description="Post an LFG to #new-lfg")
     @app_commands.guild_only()
-    async def slash_lfg(self, interaction: discord.Interaction):
-        """Region gate -> cooldown peek -> modal. All feedback is ephemeral."""
+    @app_commands.describe(
+        first_to="First to how many wins? (1-50)",
+        lobby_type="Who can join the lobby",
+        friendly_fire="Friendly fire setting",
+        mid_match_joining="Allow joining mid-match",
+        weapon_randomizer="Weapon randomizer mode",
+        enemy_outlines="Enemy outlines setting",
+    )
+    async def slash_lfg(
+        self,
+        interaction: discord.Interaction,
+        first_to: Optional[app_commands.Range[int, 1, 50]] = None,
+        lobby_type: Optional[Literal["Public", "Invite Only", "Private"]] = None,
+        friendly_fire: Optional[Literal["Enabled", "Disabled"]] = None,
+        mid_match_joining: Optional[Literal["Yes", "No"]] = None,
+        weapon_randomizer: Optional[Literal["Fully Random", "Custom", "No"]] = None,
+        enemy_outlines: Optional[Literal["Enabled", "Disabled"]] = None,
+    ):
+        """Region gate -> cooldown peek -> modal. All feedback is ephemeral.
+        The optional lobby settings live here as slash options (Discord enforces
+        the choices and the 1-50 range client-side); the modal carries the
+        mandatory fields, since modals cap at 5 components."""
         if self.get_member_region(interaction.user) is None:
             return await interaction.response.send_message(self._region_gate_message(), ephemeral=True)
         remaining = await self.check_cooldown(interaction.user)
@@ -810,15 +924,37 @@ class LFG(commands.Cog):
                 enforce_gate=True,
                 enforce_cooldown=True,
                 silent_ping=False,
+                optional_settings=self._collect_optional_settings(
+                    first_to, lobby_type, friendly_fire,
+                    mid_match_joining, weapon_randomizer, enemy_outlines,
+                ),
             )
         )
 
     @app_commands.command(name="testlfg", description="Admin test of the LFG flow — posts to the log channel")
     @app_commands.guild_only()
     @app_commands.default_permissions(administrator=True)
-    async def slash_testlfg(self, interaction: discord.Interaction):
-        """Same modal as /lfg, but: admin-only, posts to the log channel, no region
-        gate, no cooldown, and the role mention renders without notifying anyone."""
+    @app_commands.describe(
+        first_to="First to how many wins? (1-50)",
+        lobby_type="Who can join the lobby",
+        friendly_fire="Friendly fire setting",
+        mid_match_joining="Allow joining mid-match",
+        weapon_randomizer="Weapon randomizer mode",
+        enemy_outlines="Enemy outlines setting",
+    )
+    async def slash_testlfg(
+        self,
+        interaction: discord.Interaction,
+        first_to: Optional[app_commands.Range[int, 1, 50]] = None,
+        lobby_type: Optional[Literal["Public", "Invite Only", "Private"]] = None,
+        friendly_fire: Optional[Literal["Enabled", "Disabled"]] = None,
+        mid_match_joining: Optional[Literal["Yes", "No"]] = None,
+        weapon_randomizer: Optional[Literal["Fully Random", "Custom", "No"]] = None,
+        enemy_outlines: Optional[Literal["Enabled", "Disabled"]] = None,
+    ):
+        """Same modal and options as /lfg, but: admin-only, posts to the log
+        channel, no region gate, no cooldown, and the role mention renders
+        without notifying anyone."""
         if not interaction.user.guild_permissions.administrator:
             return await interaction.response.send_message(
                 "You need the Administrator permission to use this command.", ephemeral=True
@@ -830,6 +966,10 @@ class LFG(commands.Cog):
                 enforce_gate=False,
                 enforce_cooldown=False,
                 silent_ping=True,
+                optional_settings=self._collect_optional_settings(
+                    first_to, lobby_type, friendly_fire,
+                    mid_match_joining, weapon_randomizer, enemy_outlines,
+                ),
             )
         )
 
