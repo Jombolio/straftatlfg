@@ -12,9 +12,10 @@ class LFG(commands.Cog):
     """
 
     LFG_ROLE_ID = 1358388775570637001
-    LFG_CHANNEL_ID = 1284536580941287598
+    LFG_CHANNEL_ID = 1284536580941287598  # legacy-lfg channel
+    NEW_LFG_CHANNEL_ID = 1526690875470774312  # new-lfg channel
     TEST_ROLE_ID = 1270478869610238084
-    TEST_CHANNEL_ID = 1269794533923754089
+    TEST_CHANNEL_ID = 1269794533923754089 # log channel
 
     # Region reaction roles, in display order: (emoji, label, role_id)
     REGION_ROLES = [
@@ -94,7 +95,7 @@ class LFG(commands.Cog):
         await self._handle_sticky(message.channel)
 
     async def _process_lfg(self, ctx: commands.Context, channel_id: int, lobby_id: str, notes: str = None):
-        if ctx.channel.id != 1310689512615051345:
+        if ctx.channel.id != 1310689512615051345:  # straftchat
             ctx.command.reset_cooldown(ctx)
             return await ctx.send("This command can only be used in <#1310689512615051345>.", delete_after=10)
 
@@ -126,7 +127,7 @@ class LFG(commands.Cog):
 
         content = f"{role.mention}"
 
-        lfg_channel = ctx.guild.get_channel(1284536580941287598)
+        lfg_channel = ctx.guild.get_channel(channel_id)  # !lfg -> legacy-lfg, !testlfg -> log channel
         if not lfg_channel:
             ctx.command.reset_cooldown(ctx)
             return await ctx.send("LFG channel not found. Please contact an administrator.")
