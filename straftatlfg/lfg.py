@@ -2,9 +2,64 @@ import re
 import random
 import discord
 import asyncio
+import logging
+import time
+from typing import Dict, Optional, Tuple
 from redbot.core import commands, Config, checks
+from redbot.core import app_commands
 from redbot.core.bot import Red
 from redbot.core.utils.menus import menu, DEFAULT_CONTROLS
+
+log = logging.getLogger("red.straftatlfg")
+
+
+class LFGPostModal(discord.ui.Modal, title="Post an LFG"):
+    """The interactive form behind /lfg and /testlfg (new system only)."""
+
+    lobby_id = discord.ui.TextInput(
+        label="Lobby ID",
+        placeholder="Numbers only, e.g. 12345",
+        max_length=10,
+        required=True,
+    )
+    notes = discord.ui.TextInput(
+        label="Notes",
+        style=discord.TextStyle.paragraph,
+        placeholder="Casual? Competitive? Anything else!",
+        max_length=200,
+        required=False,
+    )
+
+    def __init__(self, cog, destination_id: int, enforce_gate: bool, enforce_cooldown: bool, silent_ping: bool):
+        super().__init__()
+        self.cog = cog
+        self.destination_id = destination_id
+        self.enforce_gate = enforce_gate
+        self.enforce_cooldown = enforce_cooldown
+        self.silent_ping = silent_ping
+        # Set when this submission consumed the cooldown; cleared the moment the
+        # post lands so a late failure can never refund a live post.
+        self.committed_stamp: Optional[float] = None
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await self.cog.handle_lfg_submit(interaction, self)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        log.exception("LFGPostModal submission failed", exc_info=error)
+        if self.committed_stamp is not None:
+            try:
+                await self.cog.refund_cooldown(interaction.user, self.committed_stamp)
+            except Exception:
+                log.exception("Cooldown refund failed during modal error handling")
+        try:
+            msg = "Something went wrong — try again."
+            if interaction.response.is_done():
+                await interaction.followup.send(msg, ephemeral=True)
+            else:
+                await interaction.response.send_message(msg, ephemeral=True)
+        except discord.HTTPException:
+            pass
+
 
 class LFG(commands.Cog):
     """
@@ -16,6 +71,8 @@ class LFG(commands.Cog):
     NEW_LFG_CHANNEL_ID = 1526690875470774312  # new-lfg channel
     TEST_ROLE_ID = 1270478869610238084
     TEST_CHANNEL_ID = 1269794533923754089 # log channel
+    LFG_COOLDOWN_SECONDS = 60  # /lfg cooldown window (new system; legacy keeps its decorator)
+    REGION_CHANNEL_ID = None  # channel hosting the region reaction message; None -> gate message has no link
 
     # Region reaction roles, in display order: (emoji, label, role_id)
     REGION_ROLES = [
@@ -39,6 +96,10 @@ class LFG(commands.Cog):
             "region_message_ids": []  # message IDs of posted region reaction-role embeds
         }
         self.config.register_guild(**default_guild)
+        self.config.register_member(last_lfg_ts=0.0)
+        # New-system state (slash commands). Legacy prefix commands never touch these.
+        self._cooldown_cache: Dict[Tuple[int, int], float] = {}
+        self._ping_toggle_last: Dict[int, float] = {}
 
     def _region_role_map(self):
         """Return a dict mapping region emoji -> role_id."""
@@ -570,3 +631,244 @@ class LFG(commands.Cog):
             ctx.command.reset_cooldown(ctx)
             # Log other errors
             raise error
+
+    # ------------------------------------------------------------------
+    # New system (slash commands). Purely additive — the legacy prefix
+    # commands above are frozen and share no code with this block.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def sanitize_notes(notes: Optional[str]) -> Optional[str]:
+        """Same sanitization as legacy _process_lfg: unwrap masked links, strip raw URLs."""
+        if notes:
+            notes = re.sub(r"\[([^\]]+)\]\(https?://[^\s\)]+\)", r"\1", notes)
+            notes = re.sub(r"https?://[^\s]+", "", notes)
+        return notes
+
+    def get_member_region(self, member: discord.Member) -> Optional[Tuple[str, str, int]]:
+        """First REGION_ROLES entry (emoji, label, role_id) the member holds, else None."""
+        member_role_ids = {r.id for r in member.roles}
+        return next((rg for rg in self.REGION_ROLES if rg[2] in member_role_ids), None)
+
+    def _region_gate_message(self) -> str:
+        if self.REGION_CHANNEL_ID:
+            return f"You need a region role to post — pick one in <#{self.REGION_CHANNEL_ID}> first."
+        return "You need a region role to post — ask an admin where to pick one."
+
+    def build_lfg_embed(
+        self,
+        member: discord.Member,
+        lobby_id: str,
+        notes: Optional[str],
+        region: Optional[Tuple[str, str, int]] = None,
+    ) -> discord.Embed:
+        """Same look as the legacy embed, plus an optional Region field."""
+        title = "Euuuuuugh!" if random.randint(1, 1000) == 1 else "Looking For Group"
+        color = discord.Color.green() if any(r.id == 1387554310832918528 for r in member.roles) else discord.Color.blue()
+        embed = discord.Embed(title=title, color=color, description=notes)
+        embed.add_field(name="Lobby ID", value=f"`{lobby_id}`", inline=True)
+        embed.add_field(name="Host", value=member.mention, inline=True)
+        if region is not None:
+            embed.add_field(name="Region", value=f"{region[0]} {region[1]}", inline=True)
+        embed.set_footer(text="Join the lobby using the ID above!", icon_url=member.display_avatar.url)
+        return embed
+
+    async def check_cooldown(self, member: discord.Member) -> float:
+        """Remaining cooldown seconds. Never writes a stamp; warms the cache from Config."""
+        key = (member.guild.id, member.id)
+        if key not in self._cooldown_cache:
+            persisted = await self.config.member(member).last_lfg_ts()
+            # setdefault, never assignment: a concurrent commit that stamped the
+            # cache while we awaited Config must not be clobbered by a stale read.
+            self._cooldown_cache.setdefault(key, persisted)
+        remaining = self.LFG_COOLDOWN_SECONDS - (time.time() - self._cooldown_cache[key])
+        return max(0.0, remaining)
+
+    def commit_cooldown_sync(self, member: discord.Member) -> Optional[float]:
+        """Atomic check-and-stamp of the in-memory cache. Valid only after check_cooldown
+        has warmed the cache for this member since cog load. No await between check and
+        stamp — two racing submissions cannot both pass."""
+        key = (member.guild.id, member.id)
+        now = time.time()
+        if now - self._cooldown_cache.get(key, 0.0) < self.LFG_COOLDOWN_SECONDS:
+            return None
+        self._cooldown_cache[key] = now
+        return now
+
+    async def refund_cooldown(self, member: discord.Member, stamp: float) -> None:
+        """Compare-and-clear: only refunds the exact committed stamp, so a stale
+        failure can never erase a newer legitimate stamp. Cache-only: a refunded
+        stamp was never persisted (the Config write happens only after a
+        successful send) and any previously persisted stamp is already expired,
+        so no Config write is needed here."""
+        key = (member.guild.id, member.id)
+        if self._cooldown_cache.get(key) == stamp:
+            del self._cooldown_cache[key]
+
+    async def handle_lfg_submit(self, interaction: discord.Interaction, modal: LFGPostModal):
+        """The ordering here is load-bearing — see REFACTOR_PLAN.md §4.4."""
+        member = interaction.user
+
+        # 1. Validate lobby id (server-side; Discord has no numeric input type).
+        lobby = str(modal.lobby_id.value).strip()
+        if not lobby.isdigit():
+            return await interaction.response.send_message(
+                "The Lobby ID must contain only numbers.", ephemeral=True
+            )
+
+        # 2. Authoritative region re-check (the modal may have sat open across a
+        #    role removal). A failed gate never consumes the cooldown.
+        region = self.get_member_region(member)
+        if modal.enforce_gate and region is None:
+            return await interaction.response.send_message(self._region_gate_message(), ephemeral=True)
+
+        # 3. Sanitize notes.
+        notes = self.sanitize_notes(modal.notes.value or None)
+
+        # 4-5. Cooldown: warm the cache from Config, then atomic check-and-stamp.
+        if modal.enforce_cooldown:
+            await self.check_cooldown(member)
+            stamp = self.commit_cooldown_sync(member)
+            if stamp is None:
+                remaining = await self.check_cooldown(member)
+                return await interaction.response.send_message(
+                    f"You can post again in {max(1, round(remaining))}s.", ephemeral=True
+                )
+            modal.committed_stamp = stamp
+
+        # 6. Beat the 3s interaction token deadline before any network sends.
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        # 7. Resolve destination + role, build, send. Failures before the post
+        #    lands refund the cooldown; failures after it never do.
+        role = interaction.guild.get_role(self.LFG_ROLE_ID)
+        channel = interaction.guild.get_channel(modal.destination_id)
+        if role is None or channel is None:
+            if modal.committed_stamp is not None:
+                await self.refund_cooldown(member, modal.committed_stamp)
+                modal.committed_stamp = None
+            return await interaction.followup.send(
+                "The LFG role or channel is not configured — please contact an administrator.",
+                ephemeral=True,
+            )
+
+        embed = self.build_lfg_embed(member, lobby, notes, region=region)
+        if modal.silent_ping:
+            # /testlfg: render the mention without notifying anyone.
+            mentions = discord.AllowedMentions.none()
+        else:
+            mentions = discord.AllowedMentions(roles=[role])
+
+        try:
+            message = await channel.send(content=role.mention, embed=embed, allowed_mentions=mentions)
+        except discord.HTTPException:
+            log.exception("Failed to send LFG post to channel %s", modal.destination_id)
+            if modal.committed_stamp is not None:
+                await self.refund_cooldown(member, modal.committed_stamp)
+                modal.committed_stamp = None
+            return await interaction.followup.send(
+                "I couldn't post to the LFG channel — please contact an administrator.",
+                ephemeral=True,
+            )
+
+        # The post is live: nothing beyond this point may refund the cooldown.
+        committed = modal.committed_stamp
+        modal.committed_stamp = None
+
+        # 8. Persist the stamp; a failure here logs and skips the refund (worst
+        #    case the in-memory cooldown holds for the session).
+        if committed is not None:
+            try:
+                await self.config.member(member).last_lfg_ts.set(committed)
+            except Exception:
+                log.exception("Failed to persist LFG cooldown stamp")
+
+        # 9. Ephemeral confirmation with jump link + copyable lobby id.
+        try:
+            await interaction.followup.send(
+                f"Posted! [Jump to your LFG]({message.jump_url}) — Lobby ID: `{lobby}`",
+                ephemeral=True,
+            )
+        except discord.HTTPException:
+            log.exception("Failed to send LFG confirmation followup")
+
+    @app_commands.command(name="lfg", description="Post an LFG to #new-lfg")
+    @app_commands.guild_only()
+    async def slash_lfg(self, interaction: discord.Interaction):
+        """Region gate -> cooldown peek -> modal. All feedback is ephemeral."""
+        if self.get_member_region(interaction.user) is None:
+            return await interaction.response.send_message(self._region_gate_message(), ephemeral=True)
+        remaining = await self.check_cooldown(interaction.user)
+        if remaining > 0:
+            return await interaction.response.send_message(
+                f"You can post again in {max(1, round(remaining))}s.", ephemeral=True
+            )
+        await interaction.response.send_modal(
+            LFGPostModal(
+                self,
+                destination_id=self.NEW_LFG_CHANNEL_ID,
+                enforce_gate=True,
+                enforce_cooldown=True,
+                silent_ping=False,
+            )
+        )
+
+    @app_commands.command(name="testlfg", description="Admin test of the LFG flow — posts to the log channel")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(administrator=True)
+    async def slash_testlfg(self, interaction: discord.Interaction):
+        """Same modal as /lfg, but: admin-only, posts to the log channel, no region
+        gate, no cooldown, and the role mention renders without notifying anyone."""
+        if not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message(
+                "You need the Administrator permission to use this command.", ephemeral=True
+            )
+        await interaction.response.send_modal(
+            LFGPostModal(
+                self,
+                destination_id=self.TEST_CHANNEL_ID,
+                enforce_gate=False,
+                enforce_cooldown=False,
+                silent_ping=True,
+            )
+        )
+
+    @app_commands.command(name="lfgpings", description="Toggle whether you get pinged for LFG posts")
+    @app_commands.guild_only()
+    async def slash_lfgpings(self, interaction: discord.Interaction):
+        now = time.time()
+        if now - self._ping_toggle_last.get(interaction.user.id, 0.0) < 5:
+            return await interaction.response.send_message(
+                "Slow down — try again in a moment.", ephemeral=True
+            )
+        self._ping_toggle_last[interaction.user.id] = now
+        await interaction.response.defer(ephemeral=True)
+        role = interaction.guild.get_role(self.LFG_ROLE_ID)
+        if role is None:
+            return await interaction.followup.send(
+                "LFG Role not found. Please contact an administrator.", ephemeral=True
+            )
+        try:
+            if role in interaction.user.roles:
+                await interaction.user.remove_roles(role, reason="LFG ping toggle (/lfgpings)")
+                await interaction.followup.send("You will no longer be pinged for LFG posts.", ephemeral=True)
+            else:
+                await interaction.user.add_roles(role, reason="LFG ping toggle (/lfgpings)")
+                await interaction.followup.send("You will now be pinged for LFG posts.", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "I don't have permission to manage that role.", ephemeral=True
+            )
+
+    # No cog_app_command_error handler: Red's RedTree.on_error already logs
+    # unexpected app-command exceptions and replies ephemerally — a cog handler
+    # here would duplicate both. Modal errors are handled by LFGPostModal.on_error.
+
+    async def red_delete_data_for_user(self, *, requester, user_id: int):
+        """Purge the stored cooldown timestamps (the only end-user data this cog keeps)."""
+        all_members = await self.config.all_members()
+        for guild_id, members in all_members.items():
+            if user_id in members:
+                await self.config.member_from_ids(guild_id, user_id).clear()
+        self._cooldown_cache = {k: v for k, v in self._cooldown_cache.items() if k[1] != user_id}
+        self._ping_toggle_last.pop(user_id, None)
