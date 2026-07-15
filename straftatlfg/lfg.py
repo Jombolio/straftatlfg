@@ -14,13 +14,16 @@ log = logging.getLogger("red.straftatlfg")
 
 
 class LFGPostModal(discord.ui.Modal, title="Post an LFG"):
-    """The interactive form behind /lfg and /testlfg (new system only).
+    """The interactive form behind /lfg, /modlfg, /testlfg and /testmodlfg.
 
     Discord hard-caps modals at 5 top-level components, so the modal carries
-    the mandatory fields (+ notes). The optional lobby settings arrive as
-    slash-command options (already validated client-side by Discord) and are
-    threaded through via optional_settings. Selects in modals must be wrapped
-    in discord.ui.Label (dpy 2.6+ / Red 3.5.21+); a bare select gets rejected.
+    the mandatory fields (Lobby ID, Max Players, Gamemode), the optional
+    Weapon Randomizer select, and Notes. The remaining five optional lobby
+    settings arrive as slash-command options (already validated client-side
+    by Discord) and are threaded through via optional_settings. Moddedness is
+    derived from the invoking command (is_modded), never asked in the form.
+    Selects in modals must be wrapped in discord.ui.Label (dpy 2.6+ /
+    Red 3.5.21+); a bare select gets rejected.
     """
 
     lobby_id_field = discord.ui.Label(
@@ -841,7 +844,8 @@ class LFG(commands.Cog):
 
         embed = self.build_lfg_embed(member, lobby, notes, region=region, settings=settings)
         if modal.silent_ping:
-            # /testlfg: render the mention without notifying anyone.
+            # Test commands (/testlfg, /testmodlfg): render the mention
+            # without notifying anyone.
             mentions = discord.AllowedMentions.none()
         else:
             mentions = discord.AllowedMentions(roles=[role])
