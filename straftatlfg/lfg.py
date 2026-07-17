@@ -86,6 +86,7 @@ class LFGPostModal(discord.ui.Modal, title="Post an LFG"):
         enforce_cooldown: bool,
         silent_ping: bool,
         optional_settings: Optional[Dict[str, Optional[str]]] = None,
+        chained: bool = False,
     ):
         # Moddedness is derived from the invoking command (/lfgmod vs /lfg),
         # never asked in the form; the title tells the invoker which one opened.
@@ -107,9 +108,18 @@ class LFGPostModal(discord.ui.Modal, title="Post an LFG"):
         # Set when this submission consumed the cooldown; cleared the moment the
         # post lands so a late failure can never refund a live post.
         self.committed_stamp: Optional[float] = None
+        # Chained flow (test commands): submitting stashes a draft and offers a
+        # Post Now / Optional Settings panel instead of posting immediately.
+        # Discord cannot open a modal from a modal submission, hence the bridge.
+        # Currently only wired with enforce_gate/enforce_cooldown False; routing
+        # /lfg through it would require moving the cooldown commit to finalize.
+        self.chained = chained
 
     async def on_submit(self, interaction: discord.Interaction):
-        await self.cog.handle_lfg_submit(interaction, self)
+        if self.chained:
+            await self.cog.handle_lfg_stage_one(interaction, self)
+        else:
+            await self.cog.handle_lfg_submit(interaction, self)
 
     async def on_error(self, interaction: discord.Interaction, error: Exception):
         log.exception("LFGPostModal submission failed", exc_info=error)
@@ -126,6 +136,124 @@ class LFGPostModal(discord.ui.Modal, title="Post an LFG"):
                 await interaction.response.send_message(msg, ephemeral=True)
         except discord.HTTPException:
             pass
+
+
+class LFGOptionalSettingsModal(discord.ui.Modal, title="Optional Lobby Settings"):
+    """Stage two of the chained test flow (/testlfg, /testlfgmod): the five
+    optional lobby settings. Submitting posts the draft immediately."""
+
+    first_to_field = discord.ui.Label(
+        text="First To",
+        description="Optional. First to how many wins? 1 to 50.",
+        component=discord.ui.TextInput(placeholder="10", max_length=2, required=False),
+    )
+    lobby_type_field = discord.ui.Label(
+        text="Lobby Type",
+        component=discord.ui.Select(
+            placeholder="Who can join the lobby?",
+            options=[
+                discord.SelectOption(label="Public"),
+                discord.SelectOption(label="Invite Only"),
+                discord.SelectOption(label="Private"),
+            ],
+            required=False,
+        ),
+    )
+    friendly_fire_field = discord.ui.Label(
+        text="Friendly Fire",
+        component=discord.ui.Select(
+            placeholder="Friendly fire setting?",
+            options=[
+                discord.SelectOption(label="Enabled"),
+                discord.SelectOption(label="Disabled"),
+            ],
+            required=False,
+        ),
+    )
+    mid_match_field = discord.ui.Label(
+        text="Mid-Match Joining",
+        component=discord.ui.Select(
+            placeholder="Allow joining mid-match?",
+            options=[
+                discord.SelectOption(label="Yes"),
+                discord.SelectOption(label="No"),
+            ],
+            required=False,
+        ),
+    )
+    outlines_field = discord.ui.Label(
+        text="Enemy Outlines",
+        component=discord.ui.Select(
+            placeholder="Show enemy outlines?",
+            options=[
+                discord.SelectOption(label="Enabled"),
+                discord.SelectOption(label="Disabled"),
+            ],
+            required=False,
+        ),
+    )
+
+    def __init__(self, cog, panel_view):
+        super().__init__()
+        self.cog = cog
+        self.panel_view = panel_view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await self.cog.handle_lfg_stage_two(interaction, self)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        log.exception("LFGOptionalSettingsModal submission failed", exc_info=error)
+        try:
+            msg = "Something went wrong. Please try again."
+            if interaction.response.is_done():
+                await interaction.followup.send(msg, ephemeral=True)
+            else:
+                await interaction.response.send_message(msg, ephemeral=True)
+        except discord.HTTPException:
+            pass
+
+
+class LFGDraftPanelView(discord.ui.View):
+    """The ephemeral bridge between the two chained modals (test commands).
+
+    Discord cannot open a modal in response to a modal submission, so stage
+    one's submit lands here: an ephemeral panel whose buttons either post the
+    draft immediately or open the optional-settings modal (button clicks are
+    component interactions, which CAN open modals). The draft lives on this
+    view instance only; a bot restart discards it and the admin re-runs the
+    command. Ephemeral messages are only visible and interactable to the
+    invoker, so no extra ownership check is needed.
+    """
+
+    def __init__(self, cog, draft: Dict[str, object]):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.draft = draft
+        self.message = None  # set after the panel is sent; used by on_timeout
+        # Double-post guards, checked-and-set synchronously (no await between)
+        # in finalize_chained_post: a double-clicked Post Now, or Post Now plus
+        # a still-open stage-two modal, must produce exactly one post.
+        self.finalizing = False
+        self.posted = False
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+        if self.message is not None:
+            try:
+                await self.message.edit(
+                    content="This draft expired. Run the command again to post.", view=self
+                )
+            except discord.HTTPException:
+                pass
+
+    @discord.ui.button(label="Post Now", style=discord.ButtonStyle.success)
+    async def post_now(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.finalize_chained_post(interaction, self, from_panel=True)
+
+    @discord.ui.button(label="Optional Settings", style=discord.ButtonStyle.secondary)
+    async def optional_settings(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(LFGOptionalSettingsModal(self.cog, self))
 
 
 class LFG(commands.Cog):
@@ -890,6 +1018,202 @@ class LFG(commands.Cog):
         except discord.HTTPException:
             log.exception("Failed to send LFG confirmation followup")
 
+    # -- Chained two-modal flow (test commands only; no gate, no cooldown) ----
+
+    async def handle_lfg_stage_one(self, interaction: discord.Interaction, modal: LFGPostModal):
+        """Chained stage one: validate the mandatory form, stash a draft on an
+        ephemeral panel, and offer Post Now / Optional Settings."""
+        member = interaction.user
+
+        lobby = str(modal.lobby_id_field.component.value or "").strip()
+        if not lobby.isdigit() or not 8 <= len(lobby) <= 13:
+            return await interaction.response.send_message(
+                "The Lobby ID must be 8 to 13 numbers.", ephemeral=True
+            )
+        try:
+            max_players = modal.max_players_field.component.values[0]
+            gamemode = modal.gamemode_field.component.values[0]
+        except IndexError:
+            return await interaction.response.send_message(
+                "A required selection is missing. Please try again.", ephemeral=True
+            )
+        region = self.get_member_region(member)
+        if modal.enforce_gate and region is None:
+            return await interaction.response.send_message(self._region_gate_message(), ephemeral=True)
+
+        randomizer_values = modal.randomizer_field.component.values
+        randomizer = randomizer_values[0] if randomizer_values else None
+        optional = dict(modal.optional_settings)
+        if randomizer is not None:
+            optional["Weapon Randomizer"] = randomizer
+
+        draft = {
+            "lobby": lobby,
+            "notes": self.sanitize_notes(modal.notes_field.component.value or None),
+            "region": region,
+            "mandatory": {
+                "Max Players": max_players,
+                "Gamemode": gamemode,
+                "Modded Lobby": "Yes" if modal.is_modded else "No",
+            },
+            "optional": optional,
+            "destination_id": modal.destination_id,
+            "silent_ping": modal.silent_ping,
+        }
+        view = LFGDraftPanelView(self, draft)
+        await interaction.response.send_message(
+            "Core details saved! Post now, or add optional settings first?",
+            view=view,
+            ephemeral=True,
+        )
+        try:
+            view.message = await interaction.original_response()
+        except discord.HTTPException:
+            view.message = None
+
+    async def handle_lfg_stage_two(self, interaction: discord.Interaction, modal2: LFGOptionalSettingsModal):
+        """Chained stage two: validate First To, merge the optional settings
+        into the draft, then post immediately."""
+        panel_view = modal2.panel_view
+
+        first_to_raw = str(modal2.first_to_field.component.value or "").strip()
+        if first_to_raw and (not first_to_raw.isdigit() or not 1 <= int(first_to_raw) <= 50):
+            return await interaction.response.send_message(
+                "First To must be a number from 1 to 50. Nothing was saved; use"
+                " the draft panel to try again.",
+                ephemeral=True,
+            )
+
+        # Merge into a COPY: the shared draft is never mutated, so a racing
+        # Post Now cannot pick up half-merged settings, and a failed post
+        # leaves no stale values behind for the next attempt.
+        optional = dict(panel_view.draft["optional"])
+        if first_to_raw:
+            optional["First To"] = str(int(first_to_raw))  # normalize "05" -> "5"
+        for name, field in (
+            ("Lobby Type", modal2.lobby_type_field),
+            ("Friendly Fire", modal2.friendly_fire_field),
+            ("Mid-Match Joining", modal2.mid_match_field),
+            ("Enemy Outlines", modal2.outlines_field),
+        ):
+            values = field.component.values
+            if values:
+                optional[name] = values[0]
+
+        await self.finalize_chained_post(
+            interaction, panel_view, from_panel=False, optional_override=optional
+        )
+
+    async def finalize_chained_post(
+        self,
+        interaction: discord.Interaction,
+        panel_view: LFGDraftPanelView,
+        *,
+        from_panel: bool,
+        optional_override: Optional[Dict[str, Optional[str]]] = None,
+    ):
+        """Post a chained-flow draft. from_panel=True means the Post Now button
+        (edit the panel in place); False means the stage-two modal submit
+        (fresh interaction; ephemeral followup + best-effort panel cleanup).
+        optional_override, when given, replaces the draft's optional settings
+        for this attempt only (the shared draft is never mutated).
+        Test commands never enforce the gate or cooldown, so neither applies
+        here; wiring /lfg through this flow would require the full cooldown
+        commit/refund semantics from handle_lfg_submit."""
+        draft = panel_view.draft
+        member = interaction.user
+
+        # Synchronous check-and-set: exactly one post per draft. posted is
+        # checked first, so after these guards is_finished() can only mean the
+        # panel timed out (a stage-two modal can outlive the 300s expiry).
+        if panel_view.posted:
+            return await interaction.response.send_message(
+                "This draft was already posted.", ephemeral=True
+            )
+        if panel_view.finalizing:
+            return await interaction.response.send_message(
+                "This draft is already being posted.", ephemeral=True
+            )
+        if panel_view.is_finished():
+            return await interaction.response.send_message(
+                "This draft expired. Run the command again to post.", ephemeral=True
+            )
+        panel_view.finalizing = True
+        try:
+            if from_panel:
+                await interaction.response.defer()
+            else:
+                await interaction.response.defer(ephemeral=True, thinking=True)
+
+            async def report_failure(msg: str):
+                if from_panel:
+                    # Keep the panel and its buttons alive so the admin can retry.
+                    try:
+                        await interaction.edit_original_response(content=msg, view=panel_view)
+                    except discord.HTTPException:
+                        pass
+                else:
+                    try:
+                        await interaction.followup.send(msg, ephemeral=True)
+                    except discord.HTTPException:
+                        pass
+
+            role = interaction.guild.get_role(self.LFG_ROLE_ID)
+            channel = interaction.guild.get_channel(draft["destination_id"])
+            if role is None or channel is None:
+                return await report_failure(
+                    "The LFG role or channel is not configured. Please contact an administrator."
+                )
+
+            optional = optional_override if optional_override is not None else draft["optional"]
+            settings: Dict[str, str] = dict(draft["mandatory"])
+            for name, value in optional.items():
+                if value is not None:
+                    settings[name] = value
+            embed = self.build_lfg_embed(
+                member, draft["lobby"], draft["notes"], region=draft["region"], settings=settings
+            )
+            if draft["silent_ping"]:
+                mentions = discord.AllowedMentions.none()
+            else:
+                mentions = discord.AllowedMentions(roles=[role])
+
+            try:
+                message = await channel.send(content=role.mention, embed=embed, allowed_mentions=mentions)
+            except discord.HTTPException:
+                log.exception("Failed to send chained LFG post to channel %s", draft["destination_id"])
+                return await report_failure(
+                    "I couldn't post to the LFG channel. Please contact an administrator."
+                )
+
+            panel_view.posted = True
+            panel_view.stop()
+            confirmation = f"Posted! [Jump to your LFG]({message.jump_url}) | Lobby ID: `{draft['lobby']}`"
+            if from_panel:
+                try:
+                    await interaction.edit_original_response(content=confirmation, view=None)
+                except discord.HTTPException:
+                    log.exception("Failed to edit the draft panel with the confirmation")
+                    # The post IS live; make sure the admin hears about it.
+                    try:
+                        await interaction.followup.send(confirmation, ephemeral=True)
+                    except discord.HTTPException:
+                        pass
+            else:
+                try:
+                    await interaction.followup.send(confirmation, ephemeral=True)
+                except discord.HTTPException:
+                    log.exception("Failed to send chained LFG confirmation followup")
+                if panel_view.message is not None:
+                    try:
+                        await panel_view.message.edit(content="Posted via Optional Settings.", view=None)
+                    except discord.HTTPException:
+                        pass
+        finally:
+            # Never leaves finalizing stuck True on an unexpected exception;
+            # after a success the posted guard is what blocks re-posting.
+            panel_view.finalizing = False
+
     @staticmethod
     def _collect_optional_settings(
         first_to: Optional[int],
@@ -922,6 +1246,7 @@ class LFG(commands.Cog):
         enforce_cooldown: bool,
         silent_ping: bool,
         optional_settings: Dict[str, Optional[str]],
+        chained: bool = False,
     ):
         """Shared front door for the /lfg command family: region gate ->
         cooldown peek -> modal. All feedback is ephemeral."""
@@ -942,6 +1267,7 @@ class LFG(commands.Cog):
                 enforce_cooldown=enforce_cooldown,
                 silent_ping=silent_ping,
                 optional_settings=optional_settings,
+                chained=chained,
             )
         )
 
@@ -1012,24 +1338,11 @@ class LFG(commands.Cog):
     @app_commands.command(name="testlfg", description="Admin test of the LFG flow. Posts to the log channel")
     @app_commands.guild_only()
     @app_commands.default_permissions(administrator=True)
-    @app_commands.describe(
-        first_to="First to how many wins? (1-50)",
-        lobby_type="Who can join the lobby",
-        friendly_fire="Friendly fire setting",
-        mid_match_joining="Allow joining mid-match",
-        enemy_outlines="Enemy outlines setting",
-    )
-    async def slash_testlfg(
-        self,
-        interaction: discord.Interaction,
-        first_to: Optional[app_commands.Range[int, 1, 50]] = None,
-        lobby_type: Optional[Literal["Public", "Invite Only", "Private"]] = None,
-        friendly_fire: Optional[Literal["Enabled", "Disabled"]] = None,
-        mid_match_joining: Optional[Literal["Yes", "No"]] = None,
-        enemy_outlines: Optional[Literal["Enabled", "Disabled"]] = None,
-    ):
-        """Tester for /lfg: same modal and options, but admin-only, posts to the
-        log channel, no region gate, no cooldown, silent role mention."""
+    async def slash_testlfg(self, interaction: discord.Interaction):
+        """Tester for /lfg using the chained two-modal flow: the mandatory modal,
+        then an ephemeral panel offering Post Now or an Optional Settings modal.
+        Admin-only, posts to the log channel, no region gate, no cooldown,
+        silent role mention. No slash options; stage two carries them instead."""
         if not interaction.user.guild_permissions.administrator:
             return await interaction.response.send_message(
                 "You need the Administrator permission to use this command.", ephemeral=True
@@ -1041,32 +1354,18 @@ class LFG(commands.Cog):
             enforce_gate=False,
             enforce_cooldown=False,
             silent_ping=True,
-            optional_settings=self._collect_optional_settings(
-                first_to, lobby_type, friendly_fire, mid_match_joining, enemy_outlines,
-            ),
+            optional_settings=self._collect_optional_settings(None, None, None, None, None),
+            chained=True,
         )
 
     @app_commands.command(name="testlfgmod", description="Admin test of the modded LFG flow. Posts to the log channel")
     @app_commands.guild_only()
     @app_commands.default_permissions(administrator=True)
-    @app_commands.describe(
-        first_to="First to how many wins? (1-50)",
-        lobby_type="Who can join the lobby",
-        friendly_fire="Friendly fire setting",
-        mid_match_joining="Allow joining mid-match",
-        enemy_outlines="Enemy outlines setting",
-    )
-    async def slash_testlfgmod(
-        self,
-        interaction: discord.Interaction,
-        first_to: Optional[app_commands.Range[int, 1, 50]] = None,
-        lobby_type: Optional[Literal["Public", "Invite Only", "Private"]] = None,
-        friendly_fire: Optional[Literal["Enabled", "Disabled"]] = None,
-        mid_match_joining: Optional[Literal["Yes", "No"]] = None,
-        enemy_outlines: Optional[Literal["Enabled", "Disabled"]] = None,
-    ):
-        """Tester for /lfgmod: same modal and options, but admin-only, posts to
-        the log channel, no region gate, no cooldown, silent role mention."""
+    async def slash_testlfgmod(self, interaction: discord.Interaction):
+        """Tester for /lfgmod using the chained two-modal flow: the mandatory
+        modal, then an ephemeral panel offering Post Now or an Optional Settings
+        modal. Admin-only, posts to the log channel, no region gate, no cooldown,
+        silent role mention. No slash options; stage two carries them instead."""
         if not interaction.user.guild_permissions.administrator:
             return await interaction.response.send_message(
                 "You need the Administrator permission to use this command.", ephemeral=True
@@ -1078,9 +1377,8 @@ class LFG(commands.Cog):
             enforce_gate=False,
             enforce_cooldown=False,
             silent_ping=True,
-            optional_settings=self._collect_optional_settings(
-                first_to, lobby_type, friendly_fire, mid_match_joining, enemy_outlines,
-            ),
+            optional_settings=self._collect_optional_settings(None, None, None, None, None),
+            chained=True,
         )
 
     @app_commands.command(name="lfgpings", description="Toggle whether you get pinged for LFG posts")
