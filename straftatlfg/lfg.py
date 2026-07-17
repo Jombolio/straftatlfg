@@ -56,7 +56,7 @@ class LFGPostModal(discord.ui.Modal, title="Post an LFG"):
     )
     randomizer_field = discord.ui.Label(
         text="Weapon Randomizer",
-        description="Optional — leave empty to skip",
+        description="Optional. Leave empty to skip.",
         component=discord.ui.Select(
             placeholder="Fully Random, Custom, or No?",
             options=[
@@ -69,7 +69,7 @@ class LFGPostModal(discord.ui.Modal, title="Post an LFG"):
     )
     notes_field = discord.ui.Label(
         text="Notes",
-        description="Optional — casual? Competitive? Anything else!",
+        description="Optional. Casual? Competitive? Anything else!",
         component=discord.ui.TextInput(
             style=discord.TextStyle.paragraph,
             max_length=200,
@@ -93,6 +93,11 @@ class LFGPostModal(discord.ui.Modal, title="Post an LFG"):
         self.cog = cog
         self.destination_id = destination_id
         self.is_modded = is_modded
+        if is_modded:
+            # Class-level Labels are deep-copied per modal instance, so this
+            # only rewords THIS modal's Notes field, not the vanilla one.
+            self.notes_field.description = "Optional, but please list the mods your lobby is running!"
+            self.notes_field.component.placeholder = "Which mods are you using? Anything else to note?"
         self.enforce_gate = enforce_gate
         self.enforce_cooldown = enforce_cooldown
         self.silent_ping = silent_ping
@@ -114,7 +119,7 @@ class LFGPostModal(discord.ui.Modal, title="Post an LFG"):
             except Exception:
                 log.exception("Cooldown refund failed during modal error handling")
         try:
-            msg = "Something went wrong — try again."
+            msg = "Something went wrong. Please try again."
             if interaction.response.is_done():
                 await interaction.followup.send(msg, ephemeral=True)
             else:
@@ -695,7 +700,7 @@ class LFG(commands.Cog):
             raise error
 
     # ------------------------------------------------------------------
-    # New system (slash commands). Purely additive — the legacy prefix
+    # New system (slash commands). Purely additive; the legacy prefix
     # commands above are frozen and share no code with this block.
     # ------------------------------------------------------------------
 
@@ -714,8 +719,8 @@ class LFG(commands.Cog):
 
     def _region_gate_message(self) -> str:
         if self.REGION_CHANNEL_ID:
-            return f"You need a region role to post — pick one in <#{self.REGION_CHANNEL_ID}> first."
-        return "You need a region role to post — ask an admin where to pick one."
+            return f"You need a region role to post. Pick one in <#{self.REGION_CHANNEL_ID}> first!"
+        return "You need a region role to post. Ask an admin where to pick one!"
 
     def build_lfg_embed(
         self,
@@ -752,7 +757,7 @@ class LFG(commands.Cog):
     def commit_cooldown_sync(self, member: discord.Member) -> Optional[float]:
         """Atomic check-and-stamp of the in-memory cache. Valid only after check_cooldown
         has warmed the cache for this member since cog load. No await between check and
-        stamp — two racing submissions cannot both pass."""
+        stamp, so two racing submissions cannot both pass."""
         key = (member.guild.id, member.id)
         now = time.time()
         if now - self._cooldown_cache.get(key, 0.0) < self.LFG_COOLDOWN_SECONDS:
@@ -771,7 +776,7 @@ class LFG(commands.Cog):
             del self._cooldown_cache[key]
 
     async def handle_lfg_submit(self, interaction: discord.Interaction, modal: LFGPostModal):
-        """The ordering here is load-bearing — see REFACTOR_PLAN.md §4.4."""
+        """The ordering here is load-bearing; see REFACTOR_PLAN.md §4.4."""
         member = interaction.user
 
         # 1. Validate lobby id (server-side; Discord has no numeric input type)
@@ -787,7 +792,7 @@ class LFG(commands.Cog):
             gamemode = modal.gamemode_field.component.values[0]
         except IndexError:
             return await interaction.response.send_message(
-                "A required selection is missing — please try again.", ephemeral=True
+                "A required selection is missing. Please try again.", ephemeral=True
             )
         # Optional select: untouched submits an empty values list.
         randomizer_values = modal.randomizer_field.component.values
@@ -838,7 +843,7 @@ class LFG(commands.Cog):
                 await self.refund_cooldown(member, modal.committed_stamp)
                 modal.committed_stamp = None
             return await interaction.followup.send(
-                "The LFG role or channel is not configured — please contact an administrator.",
+                "The LFG role or channel is not configured. Please contact an administrator.",
                 ephemeral=True,
             )
 
@@ -858,7 +863,7 @@ class LFG(commands.Cog):
                 await self.refund_cooldown(member, modal.committed_stamp)
                 modal.committed_stamp = None
             return await interaction.followup.send(
-                "I couldn't post to the LFG channel — please contact an administrator.",
+                "I couldn't post to the LFG channel. Please contact an administrator.",
                 ephemeral=True,
             )
 
@@ -877,7 +882,7 @@ class LFG(commands.Cog):
         # 9. Ephemeral confirmation with jump link + copyable lobby id.
         try:
             await interaction.followup.send(
-                f"Posted! [Jump to your LFG]({message.jump_url}) — Lobby ID: `{lobby}`",
+                f"Posted! [Jump to your LFG]({message.jump_url}) | Lobby ID: `{lobby}`",
                 ephemeral=True,
             )
         except discord.HTTPException:
@@ -956,7 +961,7 @@ class LFG(commands.Cog):
         mid_match_joining: Optional[Literal["Yes", "No"]] = None,
         enemy_outlines: Optional[Literal["Enabled", "Disabled"]] = None,
     ):
-        """Vanilla LFG. The post is tagged Modded Lobby: No — moddedness is
+        """Vanilla LFG. The post is tagged Modded Lobby: No; moddedness is
         derived from which command was used, never asked in the modal."""
         await self._launch_lfg_modal(
             interaction,
@@ -989,7 +994,7 @@ class LFG(commands.Cog):
         enemy_outlines: Optional[Literal["Enabled", "Disabled"]] = None,
     ):
         """Carbon copy of /lfg for modded lobbies: same modal, same gate, same
-        shared cooldown, same destination — the post is tagged Modded Lobby: Yes."""
+        shared cooldown, same destination; the post is tagged Modded Lobby: Yes."""
         await self._launch_lfg_modal(
             interaction,
             destination_id=self.NEW_LFG_CHANNEL_ID,
@@ -1002,7 +1007,7 @@ class LFG(commands.Cog):
             ),
         )
 
-    @app_commands.command(name="testlfg", description="Admin test of the LFG flow — posts to the log channel")
+    @app_commands.command(name="testlfg", description="Admin test of the LFG flow. Posts to the log channel")
     @app_commands.guild_only()
     @app_commands.default_permissions(administrator=True)
     @app_commands.describe(
@@ -1039,7 +1044,7 @@ class LFG(commands.Cog):
             ),
         )
 
-    @app_commands.command(name="testmodlfg", description="Admin test of the modded LFG flow — posts to the log channel")
+    @app_commands.command(name="testmodlfg", description="Admin test of the modded LFG flow. Posts to the log channel")
     @app_commands.guild_only()
     @app_commands.default_permissions(administrator=True)
     @app_commands.describe(
@@ -1082,7 +1087,7 @@ class LFG(commands.Cog):
         now = time.time()
         if now - self._ping_toggle_last.get(interaction.user.id, 0.0) < 5:
             return await interaction.response.send_message(
-                "Slow down — try again in a moment.", ephemeral=True
+                "Slow down! Try again in a moment.", ephemeral=True
             )
         self._ping_toggle_last[interaction.user.id] = now
         await interaction.response.defer(ephemeral=True)
@@ -1104,7 +1109,7 @@ class LFG(commands.Cog):
             )
 
     # No cog_app_command_error handler: Red's RedTree.on_error already logs
-    # unexpected app-command exceptions and replies ephemerally — a cog handler
+    # unexpected app-command exceptions and replies ephemerally; a cog handler
     # here would duplicate both. Modal errors are handled by LFGPostModal.on_error.
 
     async def red_delete_data_for_user(self, *, requester, user_id: int):
