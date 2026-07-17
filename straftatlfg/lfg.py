@@ -14,7 +14,7 @@ log = logging.getLogger("red.straftatlfg")
 
 
 class LFGPostModal(discord.ui.Modal, title="Post an LFG"):
-    """The interactive form behind /lfg, /modlfg, /testlfg and /testmodlfg.
+    """The interactive form behind /lfg, /lfgmod, /testlfg and /testlfgmod.
 
     Discord hard-caps modals at 5 top-level components, so the modal carries
     the mandatory fields (Lobby ID, Max Players, Gamemode), the optional
@@ -28,8 +28,8 @@ class LFGPostModal(discord.ui.Modal, title="Post an LFG"):
 
     lobby_id_field = discord.ui.Label(
         text="Lobby ID",
-        description="Numbers only, e.g. 12345",
-        component=discord.ui.TextInput(placeholder="12345", max_length=10, required=True),
+        description="Numbers only, 8 to 13 digits",
+        component=discord.ui.TextInput(placeholder="12345678", min_length=8, max_length=13, required=True),
     )
     max_players_field = discord.ui.Label(
         text="Max Players",
@@ -87,7 +87,7 @@ class LFGPostModal(discord.ui.Modal, title="Post an LFG"):
         silent_ping: bool,
         optional_settings: Optional[Dict[str, Optional[str]]] = None,
     ):
-        # Moddedness is derived from the invoking command (/modlfg vs /lfg),
+        # Moddedness is derived from the invoking command (/lfgmod vs /lfg),
         # never asked in the form; the title tells the invoker which one opened.
         super().__init__(title="Post a Modded LFG" if is_modded else "Post an LFG")
         self.cog = cog
@@ -782,10 +782,12 @@ class LFG(commands.Cog):
         # 1. Validate lobby id (server-side; Discord has no numeric input type)
         #    and read the mandatory selects (Discord enforces required=True, so
         #    exactly one value each; guard defensively anyway).
+        # The client enforces the 8-13 length on the raw value; re-check after
+        # stripping whitespace so padded input can't sneak under the minimum.
         lobby = str(modal.lobby_id_field.component.value or "").strip()
-        if not lobby.isdigit():
+        if not lobby.isdigit() or not 8 <= len(lobby) <= 13:
             return await interaction.response.send_message(
-                "The Lobby ID must contain only numbers.", ephemeral=True
+                "The Lobby ID must be 8 to 13 numbers.", ephemeral=True
             )
         try:
             max_players = modal.max_players_field.component.values[0]
@@ -849,7 +851,7 @@ class LFG(commands.Cog):
 
         embed = self.build_lfg_embed(member, lobby, notes, region=region, settings=settings)
         if modal.silent_ping:
-            # Test commands (/testlfg, /testmodlfg): render the mention
+            # Test commands (/testlfg, /testlfgmod): render the mention
             # without notifying anyone.
             mentions = discord.AllowedMentions.none()
         else:
@@ -975,7 +977,7 @@ class LFG(commands.Cog):
             ),
         )
 
-    @app_commands.command(name="modlfg", description="Post a modded LFG to #new-lfg")
+    @app_commands.command(name="lfgmod", description="Post a modded LFG to #new-lfg")
     @app_commands.guild_only()
     @app_commands.describe(
         first_to="First to how many wins? (1-50)",
@@ -984,7 +986,7 @@ class LFG(commands.Cog):
         mid_match_joining="Allow joining mid-match",
         enemy_outlines="Enemy outlines setting",
     )
-    async def slash_modlfg(
+    async def slash_lfgmod(
         self,
         interaction: discord.Interaction,
         first_to: Optional[app_commands.Range[int, 1, 50]] = None,
@@ -1044,7 +1046,7 @@ class LFG(commands.Cog):
             ),
         )
 
-    @app_commands.command(name="testmodlfg", description="Admin test of the modded LFG flow. Posts to the log channel")
+    @app_commands.command(name="testlfgmod", description="Admin test of the modded LFG flow. Posts to the log channel")
     @app_commands.guild_only()
     @app_commands.default_permissions(administrator=True)
     @app_commands.describe(
@@ -1054,7 +1056,7 @@ class LFG(commands.Cog):
         mid_match_joining="Allow joining mid-match",
         enemy_outlines="Enemy outlines setting",
     )
-    async def slash_testmodlfg(
+    async def slash_testlfgmod(
         self,
         interaction: discord.Interaction,
         first_to: Optional[app_commands.Range[int, 1, 50]] = None,
@@ -1063,7 +1065,7 @@ class LFG(commands.Cog):
         mid_match_joining: Optional[Literal["Yes", "No"]] = None,
         enemy_outlines: Optional[Literal["Enabled", "Disabled"]] = None,
     ):
-        """Tester for /modlfg: same modal and options, but admin-only, posts to
+        """Tester for /lfgmod: same modal and options, but admin-only, posts to
         the log channel, no region gate, no cooldown, silent role mention."""
         if not interaction.user.guild_permissions.administrator:
             return await interaction.response.send_message(
