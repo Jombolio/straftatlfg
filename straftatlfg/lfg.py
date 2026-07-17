@@ -1398,17 +1398,44 @@ class LFG(commands.Cog):
     @commands.command(name="newlfgsticky")
     @commands.guild_only()
     @checks.admin_or_permissions(administrator=True)
-    async def newlfgsticky(self, ctx: commands.Context):
+    async def newlfgsticky(self, ctx: commands.Context, state: Optional[str] = None):
         """
         Toggle the new LFG system sticky in the current channel.
+
+        With no argument the command toggles: run it once to enable, run it
+        again in the same channel to disable. You can also be explicit with
+        `!newlfgsticky on` or `!newlfgsticky off`. Note that deleting the
+        sticky message by hand does not disable it; the sticky reposts on the
+        next message. Use this command to turn it off.
 
         The sticky explains /lfg, /lfgmod and /lfgpings, and carries LFG and
         Modded LFG quick-post buttons (the same form as the slash commands,
         without the optional settings). Administrator only. Cannot be enabled
         in a channel where the legacy sticky is active.
         """
+        if state is not None and state.lower() not in ("on", "off"):
+            return await ctx.send(
+                "Use `!newlfgsticky` to toggle, or `!newlfgsticky on` /"
+                " `!newlfgsticky off` to be explicit.",
+                delete_after=10,
+            )
         guild_conf = self.config.guild(ctx.guild)
-        if ctx.channel.id not in await guild_conf.new_sticky_channels():
+        currently_on = ctx.channel.id in await guild_conf.new_sticky_channels()
+        target_on = (not currently_on) if state is None else state.lower() == "on"
+
+        if target_on and currently_on:
+            return await ctx.send(
+                "The new LFG sticky is already enabled here. Run"
+                " `!newlfgsticky off` to disable it.",
+                delete_after=10,
+            )
+        if not target_on and not currently_on:
+            return await ctx.send(
+                "The new LFG sticky is not enabled in this channel.",
+                delete_after=10,
+            )
+
+        if target_on:
             # Enable path. Refuse to share a channel with the legacy sticky:
             # the two systems would repost around each other on every message.
             if ctx.channel.id in await guild_conf.active_sticky_channels():
