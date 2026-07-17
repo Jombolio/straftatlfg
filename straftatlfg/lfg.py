@@ -910,10 +910,15 @@ class LFG(commands.Cog):
         notes: Optional[str],
         region: Optional[Tuple[str, str, int]] = None,
         settings: Optional[Dict[str, str]] = None,
+        is_modded: bool = False,
     ) -> discord.Embed:
-        """Same look as the legacy embed, plus Region and lobby-settings fields."""
+        """Same look as the legacy embed, plus Region and lobby-settings fields.
+        Modded posts are always blue; the booster green applies to vanilla only."""
         title = "Euuuuuugh!" if random.randint(1, 1000) == 1 else "Looking For Group"
-        color = discord.Color.green() if any(r.id == 1387554310832918528 for r in member.roles) else discord.Color.blue()
+        if not is_modded and any(r.id == 1387554310832918528 for r in member.roles):
+            color = discord.Color.green()
+        else:
+            color = discord.Color.blue()
         embed = discord.Embed(title=title, color=color, description=notes)
         embed.add_field(name="Lobby ID", value=f"`{lobby_id}`", inline=True)
         embed.add_field(name="Host", value=member.mention, inline=True)
@@ -1030,7 +1035,9 @@ class LFG(commands.Cog):
                 ephemeral=True,
             )
 
-        embed = self.build_lfg_embed(member, lobby, notes, region=region, settings=settings)
+        embed = self.build_lfg_embed(
+            member, lobby, notes, region=region, settings=settings, is_modded=modal.is_modded
+        )
         if modal.silent_ping:
             # Test commands (/testlfg, /testlfgmod): render the mention
             # without notifying anyone.
@@ -1112,6 +1119,7 @@ class LFG(commands.Cog):
             "optional": optional,
             "destination_id": modal.destination_id,
             "silent_ping": modal.silent_ping,
+            "is_modded": modal.is_modded,
         }
         view = LFGDraftPanelView(self, draft)
         await interaction.response.send_message(
@@ -1224,7 +1232,12 @@ class LFG(commands.Cog):
                 if value is not None:
                     settings[name] = value
             embed = self.build_lfg_embed(
-                member, draft["lobby"], draft["notes"], region=draft["region"], settings=settings
+                member,
+                draft["lobby"],
+                draft["notes"],
+                region=draft["region"],
+                settings=settings,
+                is_modded=draft["is_modded"],
             )
             if draft["silent_ping"]:
                 mentions = discord.AllowedMentions.none()
@@ -1353,6 +1366,16 @@ class LFG(commands.Cog):
         frozen legacy sticky's reposts, so the two systems can never feed each
         other in a loop."""
         if not message.guild or self.bot.user is None:
+            return
+        if message.flags.ephemeral or message.flags.loading:
+            # Verified: the creating app DOES receive MESSAGE_CREATE for its
+            # own ephemeral responses (gate deferrals, draft panels,
+            # confirmations; Red enables the DIRECT_MESSAGES intent that
+            # delivers them). Today they arrive without guild_id (open Discord
+            # bug, discord-api-docs#4557) so the guild check above happens to
+            # filter them, but that is an accident scheduled to be fixed; this
+            # flag guard is the robust filter. Invisible messages must never
+            # trigger a sticky repost.
             return
         if message.author.id == self.bot.user.id:
             if message.id == self._new_sticky_ids.get(message.channel.id):
