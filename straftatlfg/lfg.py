@@ -12,6 +12,11 @@ from redbot.core.utils.menus import menu, DEFAULT_CONTROLS
 
 log = logging.getLogger("red.straftatlfg")
 
+# Lobby ID bounds: enforced client-side by the modal field and re-checked
+# server-side after whitespace stripping (new system only; legacy !lfg is frozen).
+LOBBY_ID_MIN_LENGTH = 8
+LOBBY_ID_MAX_LENGTH = 20
+
 
 class LFGPostModal(discord.ui.Modal, title="Post an LFG"):
     """The interactive form behind /lfg, /lfgmod, /testlfg and /testlfgmod.
@@ -28,8 +33,13 @@ class LFGPostModal(discord.ui.Modal, title="Post an LFG"):
 
     lobby_id_field = discord.ui.Label(
         text="Lobby ID",
-        description="Numbers only, 8 to 13 digits",
-        component=discord.ui.TextInput(placeholder="12345678", min_length=8, max_length=13, required=True),
+        description=f"Numbers only, {LOBBY_ID_MIN_LENGTH} to {LOBBY_ID_MAX_LENGTH} digits",
+        component=discord.ui.TextInput(
+            placeholder="12345678",
+            min_length=LOBBY_ID_MIN_LENGTH,
+            max_length=LOBBY_ID_MAX_LENGTH,
+            required=True,
+        ),
     )
     max_players_field = discord.ui.Label(
         text="Max Players",
@@ -968,12 +978,13 @@ class LFG(commands.Cog):
         # 1. Validate lobby id (server-side; Discord has no numeric input type)
         #    and read the mandatory selects (Discord enforces required=True, so
         #    exactly one value each; guard defensively anyway).
-        # The client enforces the 8-13 length on the raw value; re-check after
+        # The client enforces the length bounds on the raw value; re-check after
         # stripping whitespace so padded input can't sneak under the minimum.
         lobby = str(modal.lobby_id_field.component.value or "").strip()
-        if not lobby.isdigit() or not 8 <= len(lobby) <= 13:
+        if not lobby.isdigit() or not LOBBY_ID_MIN_LENGTH <= len(lobby) <= LOBBY_ID_MAX_LENGTH:
             return await interaction.response.send_message(
-                "The Lobby ID must be 8 to 13 numbers.", ephemeral=True
+                f"The Lobby ID must be {LOBBY_ID_MIN_LENGTH} to {LOBBY_ID_MAX_LENGTH} numbers.",
+                ephemeral=True,
             )
         try:
             max_players = modal.max_players_field.component.values[0]
@@ -1086,9 +1097,10 @@ class LFG(commands.Cog):
         member = interaction.user
 
         lobby = str(modal.lobby_id_field.component.value or "").strip()
-        if not lobby.isdigit() or not 8 <= len(lobby) <= 13:
+        if not lobby.isdigit() or not LOBBY_ID_MIN_LENGTH <= len(lobby) <= LOBBY_ID_MAX_LENGTH:
             return await interaction.response.send_message(
-                "The Lobby ID must be 8 to 13 numbers.", ephemeral=True
+                f"The Lobby ID must be {LOBBY_ID_MIN_LENGTH} to {LOBBY_ID_MAX_LENGTH} numbers.",
+                ephemeral=True,
             )
         try:
             max_players = modal.max_players_field.component.values[0]
