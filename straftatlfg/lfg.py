@@ -256,6 +256,38 @@ class LFGDraftPanelView(discord.ui.View):
         await interaction.response.send_modal(LFGOptionalSettingsModal(self.cog, self))
 
 
+class LFGStickyView(discord.ui.View):
+    """Persistent quick-post buttons on the new-system sticky message.
+
+    timeout=None + stable custom_ids, registered once per cog load via
+    bot.add_view, so one registration serves every sticky in every channel
+    and the buttons keep working across restarts with zero per-message
+    bookkeeping. The buttons open the same modal as /lfg and /lfgmod (same
+    region gate, same shared cooldown) but skip the optional slash settings:
+    faster posting with just the essentials.
+    """
+
+    def __init__(self, cog):
+        super().__init__(timeout=None)
+        self.cog = cog
+
+    @discord.ui.button(
+        label="LFG",
+        style=discord.ButtonStyle.success,
+        custom_id="straftatlfg:v1:sticky_lfg",
+    )
+    async def sticky_lfg(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.handle_sticky_button(interaction, is_modded=False)
+
+    @discord.ui.button(
+        label="Modded LFG",
+        style=discord.ButtonStyle.primary,
+        custom_id="straftatlfg:v1:sticky_lfgmod",
+    )
+    async def sticky_lfgmod(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.handle_sticky_button(interaction, is_modded=True)
+
+
 class LFG(commands.Cog):
     """
     LFG command with role pings and cooldowns
@@ -292,9 +324,30 @@ class LFG(commands.Cog):
         }
         self.config.register_guild(**default_guild)
         self.config.register_member(last_lfg_ts=0.0)
-        # New-system state (slash commands). Legacy prefix commands never touch these.
+        # New-system state (slash commands + sticky). Legacy prefix commands
+        # never touch these. The new sticky keys are registered separately so
+        # the legacy default_guild dict above stays untouched.
+        self.config.register_guild(new_sticky_channels=[], new_sticky_cache={})
         self._cooldown_cache: Dict[Tuple[int, int], float] = {}
         self._ping_toggle_last: Dict[int, float] = {}
+        self._new_sticky_locks: Dict[int, asyncio.Lock] = {}
+        # In-memory mirror of each channel's current sticky message id, written
+        # under the repost lock; lets the listener recognize our own sticky
+        # without a Config read per message.
+        self._new_sticky_ids: Dict[int, int] = {}
+        self._sticky_view: Optional[LFGStickyView] = None
+
+    async def cog_load(self):
+        # Persistent-view registration: one static view serves every deployed
+        # sticky, across restarts (timeout=None + stable custom_ids).
+        self._sticky_view = LFGStickyView(self)
+        self.bot.add_view(self._sticky_view)
+
+    async def cog_unload(self):
+        # Stop the view so a reloaded cog does not leave two handlers
+        # answering the same custom_ids (double-dispatch on reload).
+        if self._sticky_view is not None:
+            self._sticky_view.stop()
 
     def _region_role_map(self):
         """Return a dict mapping region emoji -> role_id."""
@@ -1213,6 +1266,188 @@ class LFG(commands.Cog):
             # Never leaves finalizing stuck True on an unexpected exception;
             # after a success the posted guard is what blocks re-posting.
             panel_view.finalizing = False
+
+    # -- New-system sticky with quick-post buttons ----------------------------
+
+    async def handle_sticky_button(self, interaction: discord.Interaction, *, is_modded: bool):
+        """Fast path from the sticky buttons: the same gate, cooldown and modal
+        as /lfg and /lfgmod, minus the optional slash settings."""
+        await self._launch_lfg_modal(
+            interaction,
+            destination_id=self.NEW_LFG_CHANNEL_ID,
+            is_modded=is_modded,
+            enforce_gate=True,
+            enforce_cooldown=True,
+            silent_ping=False,
+            optional_settings=self._collect_optional_settings(None, None, None, None, None),
+        )
+
+    def _build_new_sticky_embed(self) -> discord.Embed:
+        if self.REGION_CHANNEL_ID:
+            region_line = f"You need a region role to post. Pick one in <#{self.REGION_CHANNEL_ID}>!"
+        else:
+            region_line = "You need a region role to post. Ask an admin where to pick one!"
+        description = (
+            "Post lobbies with slash commands. Everything stays private to you "
+            f"until your post goes live in <#{self.NEW_LFG_CHANNEL_ID}>.\n\n"
+            "**/lfg**: post a vanilla lobby. Fill in the form, and add optional "
+            "settings (First To, Lobby Type, Friendly Fire and more) right in "
+            "the command bar before you hit Enter.\n"
+            "**/lfgmod**: post a modded lobby. Same form; please list your mods "
+            "in the Notes field!\n"
+            "**/lfgpings**: toggle the LFG ping role to get notified about new "
+            "lobbies.\n\n"
+            f"{region_line}\n\n"
+            "**In a hurry?** Use the buttons below to post with just the "
+            "essentials (no optional settings)."
+        )
+        return discord.Embed(
+            title="How to use the new LFG system",
+            description=description,
+            color=discord.Color.blue(),
+        )
+
+    async def _repost_new_sticky(self, channel: discord.TextChannel, trigger_id: Optional[int] = None) -> bool:
+        """Delete-and-repost the new sticky at the bottom of the channel.
+        Guarded by a per-channel lock and stored message ids (never by title
+        matching, the legacy sticky's known footgun). Raw Config reads/writes
+        keep Config locks away from the REST calls. Returns True if a sticky
+        is in place afterwards."""
+        lock = self._new_sticky_locks.setdefault(channel.id, asyncio.Lock())
+        async with lock:
+            # Re-check under the lock: the channel may have been toggled off
+            # while we queued, or the triggering message may be the sticky we
+            # just posted (its gateway event can beat our send() returning).
+            active = await self.config.guild(channel.guild).new_sticky_channels()
+            if channel.id not in active:
+                return False
+            if trigger_id is not None and trigger_id == self._new_sticky_ids.get(channel.id):
+                return True
+            old_id = await self.config.guild(channel.guild).get_raw(
+                "new_sticky_cache", str(channel.id), default=None
+            )
+            if old_id:
+                try:
+                    old_msg = await channel.fetch_message(old_id)
+                    await old_msg.delete()
+                except discord.HTTPException:
+                    pass
+            try:
+                new_msg = await channel.send(
+                    embed=self._build_new_sticky_embed(), view=self._sticky_view
+                )
+            except discord.HTTPException:
+                log.exception("Failed to repost the new LFG sticky in channel %s", channel.id)
+                return False
+            self._new_sticky_ids[channel.id] = new_msg.id
+            await self.config.guild(channel.guild).set_raw(
+                "new_sticky_cache", str(channel.id), value=new_msg.id
+            )
+            return True
+
+    @commands.Cog.listener("on_message")
+    async def new_sticky_on_message(self, message: discord.Message):
+        """Keeps the new sticky at the bottom of its channels. Bot messages DO
+        trigger a repost (LFG posts landing in the feed must push the sticky
+        down); only two messages are ignored: our own current sticky, and the
+        frozen legacy sticky's reposts, so the two systems can never feed each
+        other in a loop."""
+        if not message.guild or self.bot.user is None:
+            return
+        if message.author.id == self.bot.user.id:
+            if message.id == self._new_sticky_ids.get(message.channel.id):
+                return
+            if message.embeds and message.embeds[0].title in (
+                "How to use the LFG system",      # the legacy sticky reposting itself
+                "How to use the new LFG system",  # our own sticky under any gateway timing
+            ):
+                # Title matching is used ONLY as an ignore filter on our own
+                # bot's messages (never to find or delete anything), so the
+                # legacy title footgun does not apply. Only _repost_new_sticky
+                # ever sends the new-sticky embed, which makes this a hard
+                # bound of one repost per external trigger.
+                return
+        active = await self.config.guild(message.guild).new_sticky_channels()
+        if message.channel.id not in active:
+            return
+        await self._repost_new_sticky(message.channel, trigger_id=message.id)
+
+    @commands.command(name="newlfgsticky")
+    @commands.guild_only()
+    @checks.admin_or_permissions(administrator=True)
+    async def newlfgsticky(self, ctx: commands.Context):
+        """
+        Toggle the new LFG system sticky in the current channel.
+
+        The sticky explains /lfg, /lfgmod and /lfgpings, and carries LFG and
+        Modded LFG quick-post buttons (the same form as the slash commands,
+        without the optional settings). Administrator only. Cannot be enabled
+        in a channel where the legacy sticky is active.
+        """
+        guild_conf = self.config.guild(ctx.guild)
+        if ctx.channel.id not in await guild_conf.new_sticky_channels():
+            # Enable path. Refuse to share a channel with the legacy sticky:
+            # the two systems would repost around each other on every message.
+            if ctx.channel.id in await guild_conf.active_sticky_channels():
+                return await ctx.send(
+                    "The legacy sticky is active in this channel. Disable it"
+                    " first with `!sticky-toggle` to avoid the two stickies"
+                    " fighting.",
+                    delete_after=15,
+                )
+            async with guild_conf.new_sticky_channels() as active:
+                if ctx.channel.id not in active:
+                    active.append(ctx.channel.id)
+            if await self._repost_new_sticky(ctx.channel):
+                # A reaction, not a message: a confirmation message would itself
+                # trigger one redundant sticky repost.
+                try:
+                    await ctx.message.add_reaction("✅")
+                except discord.DiscordException:
+                    pass
+            else:
+                # Roll back so every later message does not retry a failing
+                # send, and tear down any sticky a racing listener repost may
+                # have managed to place in the window.
+                async with guild_conf.new_sticky_channels() as active:
+                    if ctx.channel.id in active:
+                        active.remove(ctx.channel.id)
+                await self._teardown_new_sticky(ctx.channel)
+                await ctx.send(
+                    "I couldn't post the sticky here. Check my permissions"
+                    " (Send Messages and Embed Links), then try again."
+                )
+        else:
+            # Disable path: deactivate first so queued reposts bail on their
+            # re-check, then clean up under the repost lock so an in-flight
+            # repost finishes first and its message is the one we delete.
+            async with guild_conf.new_sticky_channels() as active:
+                if ctx.channel.id in active:
+                    active.remove(ctx.channel.id)
+            await self._teardown_new_sticky(ctx.channel)
+            await ctx.send("New LFG sticky disabled in this channel.", delete_after=10)
+
+    async def _teardown_new_sticky(self, channel: discord.TextChannel):
+        """Under the repost lock: clear the stored sticky id and delete the
+        sticky message if one exists. The channel must already have been
+        removed from new_sticky_channels so queued reposts bail out."""
+        guild_conf = self.config.guild(channel.guild)
+        lock = self._new_sticky_locks.setdefault(channel.id, asyncio.Lock())
+        async with lock:
+            old_id = await guild_conf.get_raw(
+                "new_sticky_cache", str(channel.id), default=None
+            )
+            try:
+                await guild_conf.clear_raw("new_sticky_cache", str(channel.id))
+            except KeyError:
+                pass
+            self._new_sticky_ids.pop(channel.id, None)
+            if old_id:
+                try:
+                    old_msg = await channel.fetch_message(old_id)
+                    await old_msg.delete()
+                except discord.HTTPException:
+                    pass
 
     @staticmethod
     def _collect_optional_settings(
