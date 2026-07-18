@@ -17,6 +17,9 @@ log = logging.getLogger("red.straftatlfg")
 LOBBY_ID_MIN_LENGTH = 8
 LOBBY_ID_MAX_LENGTH = 20
 
+# Notes field cap, shown in the field copy and enforced client-side.
+NOTES_MAX_LENGTH = 200
+
 
 class LFGPostModal(discord.ui.Modal, title="Post an LFG"):
     """Stage one of the guided two-modal bridge: the sticky quick-post
@@ -29,66 +32,12 @@ class LFGPostModal(discord.ui.Modal, title="Post an LFG"):
     ephemeral panel offering Post Now or an Optional Settings modal with the
     remaining five settings (Discord cannot open a modal from a modal
     submission, hence the button bridge). Moddedness is derived from the
-    invoking command (is_modded), never asked in the form. Selects in modals
-    must be wrapped in discord.ui.Label (dpy 2.6+ / Red 3.5.21+); a bare
-    select gets rejected.
+    invoking command (is_modded), never asked in the form. Vanilla offers
+    Max Players as a 2/3/4 select; modded lobbies support up to 10 players,
+    so their variant uses a numerical text input validated server-side
+    (2 to 10). Fields are built in __init__ (the documented alternative to
+    class-level Labels) so the two variants can differ.
     """
-
-    lobby_id_field = discord.ui.Label(
-        text="Lobby ID",
-        description=f"Numbers only, {LOBBY_ID_MIN_LENGTH} to {LOBBY_ID_MAX_LENGTH} digits",
-        component=discord.ui.TextInput(
-            placeholder="12345678",
-            min_length=LOBBY_ID_MIN_LENGTH,
-            max_length=LOBBY_ID_MAX_LENGTH,
-            required=True,
-        ),
-    )
-    max_players_field = discord.ui.Label(
-        text="Max Players",
-        component=discord.ui.Select(
-            placeholder="How many players can join?",
-            options=[
-                discord.SelectOption(label="2"),
-                discord.SelectOption(label="3"),
-                discord.SelectOption(label="4"),
-            ],
-            required=True,
-        ),
-    )
-    gamemode_field = discord.ui.Label(
-        text="Gamemode",
-        component=discord.ui.Select(
-            placeholder="FFA or Teams?",
-            options=[
-                discord.SelectOption(label="FFA"),
-                discord.SelectOption(label="Teams"),
-            ],
-            required=True,
-        ),
-    )
-    randomizer_field = discord.ui.Label(
-        text="Weapon Randomizer",
-        description="Optional. Leave empty to skip.",
-        component=discord.ui.Select(
-            placeholder="Fully Random, Custom, or No?",
-            options=[
-                discord.SelectOption(label="Fully Random"),
-                discord.SelectOption(label="Custom"),
-                discord.SelectOption(label="No"),
-            ],
-            required=False,
-        ),
-    )
-    notes_field = discord.ui.Label(
-        text="Notes",
-        description="Optional. Casual? Competitive? Anything else!",
-        component=discord.ui.TextInput(
-            style=discord.TextStyle.paragraph,
-            max_length=200,
-            required=False,
-        ),
-    )
 
     def __init__(
         self,
@@ -106,11 +55,6 @@ class LFGPostModal(discord.ui.Modal, title="Post an LFG"):
         self.cog = cog
         self.destination_id = destination_id
         self.is_modded = is_modded
-        if is_modded:
-            # Class-level Labels are deep-copied per modal instance, so this
-            # only rewords THIS modal's Notes field, not the vanilla one.
-            self.notes_field.description = "Optional, but please list the mods your lobby is running!"
-            self.notes_field.component.placeholder = "Which mods are you using? Anything else to note?"
         self.enforce_gate = enforce_gate
         self.enforce_cooldown = enforce_cooldown
         self.silent_ping = silent_ping
@@ -118,6 +62,97 @@ class LFGPostModal(discord.ui.Modal, title="Post an LFG"):
         # two fills a copy at post time (stable display order). Stage one never
         # commits the cooldown, so there is nothing here to refund on error.
         self.optional_settings: Dict[str, Optional[str]] = optional_settings or {}
+
+        self.lobby_id_field = discord.ui.Label(
+            text="Lobby ID",
+            description=f"Numbers only, {LOBBY_ID_MIN_LENGTH} to {LOBBY_ID_MAX_LENGTH} digits",
+            component=discord.ui.TextInput(
+                placeholder="12345678",
+                min_length=LOBBY_ID_MIN_LENGTH,
+                max_length=LOBBY_ID_MAX_LENGTH,
+                required=True,
+            ),
+        )
+        if is_modded:
+            self.max_players_field = discord.ui.Label(
+                text="Max Players",
+                description="A number from 2 to 10",
+                component=discord.ui.TextInput(placeholder="10", max_length=2, required=True),
+            )
+        else:
+            self.max_players_field = discord.ui.Label(
+                text="Max Players",
+                component=discord.ui.Select(
+                    placeholder="How many players can join?",
+                    options=[
+                        discord.SelectOption(label="2"),
+                        discord.SelectOption(label="3"),
+                        discord.SelectOption(label="4"),
+                    ],
+                    required=True,
+                ),
+            )
+        self.gamemode_field = discord.ui.Label(
+            text="Gamemode",
+            component=discord.ui.Select(
+                placeholder="FFA or Teams?",
+                options=[
+                    discord.SelectOption(label="FFA"),
+                    discord.SelectOption(label="Teams"),
+                ],
+                required=True,
+            ),
+        )
+        self.randomizer_field = discord.ui.Label(
+            text="Weapon Randomizer",
+            description="Optional. Leave empty to skip.",
+            component=discord.ui.Select(
+                placeholder="Fully Random, Custom, or No?",
+                options=[
+                    discord.SelectOption(label="Fully Random"),
+                    discord.SelectOption(label="Custom"),
+                    discord.SelectOption(label="No"),
+                ],
+                required=False,
+            ),
+        )
+        if is_modded:
+            notes_description = f"Optional, but please list the mods your lobby is running! Max {NOTES_MAX_LENGTH} characters."
+            notes_placeholder = "Which mods are you using? Anything else to note?"
+        else:
+            notes_description = f"Optional. Casual? Competitive? Anything else! Max {NOTES_MAX_LENGTH} characters."
+            notes_placeholder = None
+        self.notes_field = discord.ui.Label(
+            text="Notes",
+            description=notes_description,
+            component=discord.ui.TextInput(
+                style=discord.TextStyle.paragraph,
+                max_length=NOTES_MAX_LENGTH,
+                required=False,
+                placeholder=notes_placeholder,
+            ),
+        )
+        for field in (
+            self.lobby_id_field,
+            self.max_players_field,
+            self.gamemode_field,
+            self.randomizer_field,
+            self.notes_field,
+        ):
+            self.add_item(field)
+
+    def read_max_players(self) -> Tuple[Optional[str], Optional[str]]:
+        """(value, error_message) for either variant: the vanilla 2/3/4 select
+        or the modded numerical text input validated 2 to 10."""
+        component = self.max_players_field.component
+        if isinstance(component, discord.ui.TextInput):
+            raw = str(component.value or "").strip()
+            if not raw.isdecimal() or not 2 <= int(raw) <= 10:
+                return None, "Max Players must be a number from 2 to 10."
+            return str(int(raw)), None
+        if not component.values:
+            return None, "A required selection is missing. Please try again."
+        return component.values[0], None
 
     async def on_submit(self, interaction: discord.Interaction):
         await self.cog.handle_lfg_stage_one(interaction, self)
@@ -137,79 +172,20 @@ class LFGPostModal(discord.ui.Modal, title="Post an LFG"):
 class LFGFusedModal(discord.ui.Modal, title="Post an LFG"):
     """The streamlined single-modal flow behind /lfg and /lfgmod.
 
-    All ten fields compressed into Discord's 5-component modal cap using the
-    verified Revision 16 layout: Lobby ID, First To and Notes as text inputs,
-    the Max Players x Gamemode cross-product as a required radio group, and
-    the remaining optional settings packed into one multi-select. Discord
-    cannot enforce one-per-category inside the packed select, so exclusivity
-    is validated server-side on submit and a conflict is refused ephemerally
-    before anything is consumed. The sticky buttons keep the guided two-modal
-    bridge (LFGPostModal) as the detailed alternative.
+    Everything compressed into Discord's 5-component modal cap. Vanilla
+    (Revision 16 layout): Lobby ID, the Max Players x Gamemode cross-product
+    as a 6-option radio group, the packed optional-settings multi-select,
+    First To, Notes. Modded (Revision 18 layout): Max Players is a numerical
+    text input validated server-side (2 to 10) with Gamemode as its own
+    radio group, which costs a slot, so the modded variant has no First To
+    field (it remains available on the detailed button tier). Fields are
+    built in __init__ (the documented alternative to class-level Labels) so
+    the two variants can differ. Discord cannot enforce one-per-category
+    inside the packed select, so exclusivity is validated server-side on
+    submit and a conflict is refused ephemerally before anything is consumed.
+    The sticky buttons keep the guided two-modal bridge (LFGPostModal) as the
+    detailed alternative.
     """
-
-    lobby_id_field = discord.ui.Label(
-        text="Lobby ID",
-        description=f"Numbers only, {LOBBY_ID_MIN_LENGTH} to {LOBBY_ID_MAX_LENGTH} digits",
-        component=discord.ui.TextInput(
-            placeholder="12345678",
-            min_length=LOBBY_ID_MIN_LENGTH,
-            max_length=LOBBY_ID_MAX_LENGTH,
-            required=True,
-        ),
-    )
-    core_field = discord.ui.Label(
-        text="Lobby Setup",
-        description="Max players and gamemode",
-        component=discord.ui.RadioGroup(
-            options=[
-                discord.RadioGroupOption(label="2 players, FFA", value="2|FFA"),
-                discord.RadioGroupOption(label="2 players, Teams", value="2|Teams"),
-                discord.RadioGroupOption(label="3 players, FFA", value="3|FFA"),
-                discord.RadioGroupOption(label="3 players, Teams", value="3|Teams"),
-                discord.RadioGroupOption(label="4 players, FFA", value="4|FFA"),
-                discord.RadioGroupOption(label="4 players, Teams", value="4|Teams"),
-            ],
-            required=True,
-        ),
-    )
-    settings_field = discord.ui.Label(
-        text="Optional Settings",
-        description="Pick at most one option per category",
-        component=discord.ui.Select(
-            placeholder="Randomizer, lobby type, friendly fire and more",
-            min_values=0,
-            max_values=12,
-            required=False,
-            options=[
-                discord.SelectOption(label="Weapon Randomizer: Fully Random", value="Weapon Randomizer|Fully Random"),
-                discord.SelectOption(label="Weapon Randomizer: Custom", value="Weapon Randomizer|Custom"),
-                discord.SelectOption(label="Weapon Randomizer: No", value="Weapon Randomizer|No"),
-                discord.SelectOption(label="Lobby Type: Public", value="Lobby Type|Public"),
-                discord.SelectOption(label="Lobby Type: Invite Only", value="Lobby Type|Invite Only"),
-                discord.SelectOption(label="Lobby Type: Private", value="Lobby Type|Private"),
-                discord.SelectOption(label="Friendly Fire: Enabled", value="Friendly Fire|Enabled"),
-                discord.SelectOption(label="Friendly Fire: Disabled", value="Friendly Fire|Disabled"),
-                discord.SelectOption(label="Mid-Match Joining: Yes", value="Mid-Match Joining|Yes"),
-                discord.SelectOption(label="Mid-Match Joining: No", value="Mid-Match Joining|No"),
-                discord.SelectOption(label="Enemy Outlines: Enabled", value="Enemy Outlines|Enabled"),
-                discord.SelectOption(label="Enemy Outlines: Disabled", value="Enemy Outlines|Disabled"),
-            ],
-        ),
-    )
-    first_to_field = discord.ui.Label(
-        text="First To",
-        description="Optional. First to how many wins? 1 to 50.",
-        component=discord.ui.TextInput(placeholder="10", max_length=2, required=False),
-    )
-    notes_field = discord.ui.Label(
-        text="Notes",
-        description="Optional. Casual? Competitive? Anything else!",
-        component=discord.ui.TextInput(
-            style=discord.TextStyle.paragraph,
-            max_length=200,
-            required=False,
-        ),
-    )
 
     def __init__(
         self,
@@ -224,17 +200,149 @@ class LFGFusedModal(discord.ui.Modal, title="Post an LFG"):
         self.cog = cog
         self.destination_id = destination_id
         self.is_modded = is_modded
-        if is_modded:
-            # Class-level Labels are deep-copied per modal instance, so this
-            # only rewords THIS modal's Notes field, not the vanilla one.
-            self.notes_field.description = "Optional, but please list the mods your lobby is running!"
-            self.notes_field.component.placeholder = "Which mods are you using? Anything else to note?"
         self.enforce_gate = enforce_gate
         self.enforce_cooldown = enforce_cooldown
         self.silent_ping = silent_ping
         # Set when this submission consumed the cooldown; cleared the moment
         # the post lands so a late failure can never refund a live post.
         self.committed_stamp: Optional[float] = None
+
+        self.lobby_id_field = discord.ui.Label(
+            text="Lobby ID",
+            description=f"Numbers only, {LOBBY_ID_MIN_LENGTH} to {LOBBY_ID_MAX_LENGTH} digits",
+            component=discord.ui.TextInput(
+                placeholder="12345678",
+                min_length=LOBBY_ID_MIN_LENGTH,
+                max_length=LOBBY_ID_MAX_LENGTH,
+                required=True,
+            ),
+        )
+        if is_modded:
+            # Modded lobbies support up to 10 players. A cross-product would
+            # need 18 options (over the radio group's 10-option cap), so Max
+            # Players becomes a numerical input and Gamemode its own radio
+            # group. The extra slot comes from dropping First To, which stays
+            # available on the detailed button tier.
+            self.core_field = None
+            self.max_players_field = discord.ui.Label(
+                text="Max Players",
+                description="A number from 2 to 10",
+                component=discord.ui.TextInput(placeholder="10", max_length=2, required=True),
+            )
+            self.gamemode_field = discord.ui.Label(
+                text="Gamemode",
+                component=discord.ui.RadioGroup(
+                    options=[
+                        discord.RadioGroupOption(label="FFA", value="FFA"),
+                        discord.RadioGroupOption(label="Teams", value="Teams"),
+                    ],
+                    required=True,
+                ),
+            )
+        else:
+            self.max_players_field = None
+            self.gamemode_field = None
+            self.core_field = discord.ui.Label(
+                text="Lobby Setup",
+                description="Max players and gamemode",
+                component=discord.ui.RadioGroup(
+                    options=[
+                        discord.RadioGroupOption(label=f"{n} players, {mode}", value=f"{n}|{mode}")
+                        for n in (2, 3, 4)
+                        for mode in ("FFA", "Teams")
+                    ],
+                    required=True,
+                ),
+            )
+        self.settings_field = discord.ui.Label(
+            text="Optional Settings",
+            description="Pick at most one option per category",
+            component=discord.ui.Select(
+                placeholder="Randomizer, lobby type, friendly fire and more",
+                min_values=0,
+                max_values=12,
+                required=False,
+                options=[
+                    discord.SelectOption(label="Weapon Randomizer: Fully Random", value="Weapon Randomizer|Fully Random"),
+                    discord.SelectOption(label="Weapon Randomizer: Custom", value="Weapon Randomizer|Custom"),
+                    discord.SelectOption(label="Weapon Randomizer: No", value="Weapon Randomizer|No"),
+                    discord.SelectOption(label="Lobby Type: Public", value="Lobby Type|Public"),
+                    discord.SelectOption(label="Lobby Type: Invite Only", value="Lobby Type|Invite Only"),
+                    discord.SelectOption(label="Lobby Type: Private", value="Lobby Type|Private"),
+                    discord.SelectOption(label="Friendly Fire: Enabled", value="Friendly Fire|Enabled"),
+                    discord.SelectOption(label="Friendly Fire: Disabled", value="Friendly Fire|Disabled"),
+                    discord.SelectOption(label="Mid-Match Joining: Yes", value="Mid-Match Joining|Yes"),
+                    discord.SelectOption(label="Mid-Match Joining: No", value="Mid-Match Joining|No"),
+                    discord.SelectOption(label="Enemy Outlines: Enabled", value="Enemy Outlines|Enabled"),
+                    discord.SelectOption(label="Enemy Outlines: Disabled", value="Enemy Outlines|Disabled"),
+                ],
+            ),
+        )
+        if is_modded:
+            self.first_to_field = None
+        else:
+            self.first_to_field = discord.ui.Label(
+                text="First To",
+                description="Optional. First to how many wins? 1 to 50.",
+                component=discord.ui.TextInput(placeholder="10", max_length=2, required=False),
+            )
+        if is_modded:
+            notes_description = f"Optional, but please list the mods your lobby is running! Max {NOTES_MAX_LENGTH} characters."
+            notes_placeholder = "Which mods are you using? Anything else to note?"
+        else:
+            notes_description = f"Optional. Casual? Competitive? Anything else! Max {NOTES_MAX_LENGTH} characters."
+            notes_placeholder = None
+        self.notes_field = discord.ui.Label(
+            text="Notes",
+            description=notes_description,
+            component=discord.ui.TextInput(
+                style=discord.TextStyle.paragraph,
+                max_length=NOTES_MAX_LENGTH,
+                required=False,
+                placeholder=notes_placeholder,
+            ),
+        )
+        if is_modded:
+            fields = (
+                self.lobby_id_field,
+                self.max_players_field,
+                self.gamemode_field,
+                self.settings_field,
+                self.notes_field,
+            )
+        else:
+            fields = (
+                self.lobby_id_field,
+                self.core_field,
+                self.settings_field,
+                self.first_to_field,
+                self.notes_field,
+            )
+        for field in fields:
+            self.add_item(field)
+
+    def read_core(self) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+        """(max_players, gamemode, error_message) for either variant."""
+        if self.is_modded:
+            raw = str(self.max_players_field.component.value or "").strip()
+            if not raw.isdecimal() or not 2 <= int(raw) <= 10:
+                return None, None, "Max Players must be a number from 2 to 10."
+            gamemode = self.gamemode_field.component.value
+            if not gamemode:
+                return None, None, "A required selection is missing. Please try again."
+            return str(int(raw)), gamemode, None
+        value = self.core_field.component.value
+        if not value:
+            return None, None, "A required selection is missing. Please try again."
+        max_players, _, gamemode = value.partition("|")
+        return max_players, gamemode, None
+
+    def first_to_raw(self) -> str:
+        """The First To entry, or an empty string on the modded variant,
+        which has no First To field."""
+        if self.first_to_field is None:
+            return ""
+        return str(self.first_to_field.component.value or "").strip()
 
     async def on_submit(self, interaction: discord.Interaction):
         await self.cog.handle_fused_submit(interaction, self)
@@ -445,7 +553,7 @@ class LFG(commands.Cog):
         " Contact the moderators if you believe this is a mistake."
     )
     LFG_COOLDOWN_SECONDS = 60  # /lfg cooldown window (new system; legacy keeps its decorator)
-    REGION_CHANNEL_ID = None  # channel hosting the region reaction message; None -> gate message has no link
+    REGION_CHANNEL_ID = 1358380625744105522  # regions channel: hosts the region reaction message
 
     # Region reaction roles, in display order: (emoji, label, role_id)
     REGION_ROLES = [
@@ -1041,11 +1149,18 @@ class LFG(commands.Cog):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def sanitize_notes(notes: Optional[str]) -> Optional[str]:
-        """Same sanitization as legacy _process_lfg: unwrap masked links, strip raw URLs."""
+    def sanitize_notes(notes: Optional[str], allow_links: bool = False) -> Optional[str]:
+        """Vanilla posts: unwrap masked links and strip raw URLs, same as the
+        legacy _process_lfg sanitization. Modded posts pass allow_links=True
+        because mod lists are usually links: raw URLs are kept, and masked
+        links are rewritten to expose their destination (text (url)) so a
+        role-pinging post cannot disguise where a link goes."""
         if notes:
-            notes = re.sub(r"\[([^\]]+)\]\(https?://[^\s\)]+\)", r"\1", notes)
-            notes = re.sub(r"https?://[^\s]+", "", notes)
+            if allow_links:
+                notes = re.sub(r"\[([^\]]+)\]\((https?://[^\s\)]+)\)", r"\1 (\2)", notes)
+            else:
+                notes = re.sub(r"\[([^\]]+)\]\(https?://[^\s\)]+\)", r"\1", notes)
+                notes = re.sub(r"https?://[^\s]+", "", notes)
         return notes
 
     def get_member_region(self, member: discord.Member) -> Optional[Tuple[str, str, int]]:
@@ -1137,20 +1252,17 @@ class LFG(commands.Cog):
 
         # Validation: nothing is consumed on any failure here.
         lobby = str(modal.lobby_id_field.component.value or "").strip()
-        if not lobby.isdigit() or not LOBBY_ID_MIN_LENGTH <= len(lobby) <= LOBBY_ID_MAX_LENGTH:
+        if not lobby.isdecimal() or not LOBBY_ID_MIN_LENGTH <= len(lobby) <= LOBBY_ID_MAX_LENGTH:
             return await interaction.response.send_message(
                 f"The Lobby ID must be {LOBBY_ID_MIN_LENGTH} to {LOBBY_ID_MAX_LENGTH} numbers.",
                 ephemeral=True,
             )
-        core = modal.core_field.component.value
-        if not core:
-            return await interaction.response.send_message(
-                "A required selection is missing. Please try again.", ephemeral=True
-            )
-        max_players, _, gamemode = core.partition("|")
+        max_players, gamemode, core_error = modal.read_core()
+        if core_error:
+            return await interaction.response.send_message(core_error, ephemeral=True)
 
-        first_to_raw = str(modal.first_to_field.component.value or "").strip()
-        if first_to_raw and (not first_to_raw.isdigit() or not 1 <= int(first_to_raw) <= 50):
+        first_to_raw = modal.first_to_raw()
+        if first_to_raw and (not first_to_raw.isdecimal() or not 1 <= int(first_to_raw) <= 50):
             return await interaction.response.send_message(
                 "First To must be a number from 1 to 50.", ephemeral=True
             )
@@ -1175,7 +1287,9 @@ class LFG(commands.Cog):
         if modal.enforce_gate and region is None:
             return await interaction.response.send_message(self._region_gate_message(), ephemeral=True)
 
-        notes = self.sanitize_notes(modal.notes_field.component.value or None)
+        notes = self.sanitize_notes(
+            modal.notes_field.component.value or None, allow_links=modal.is_modded
+        )
         optional = self._blank_optional_settings()
         if first_to_raw:
             optional["First To"] = str(int(first_to_raw))
@@ -1261,13 +1375,15 @@ class LFG(commands.Cog):
             return await interaction.response.send_message(self.LFG_BLOCKED_MESSAGE, ephemeral=True)
 
         lobby = str(modal.lobby_id_field.component.value or "").strip()
-        if not lobby.isdigit() or not LOBBY_ID_MIN_LENGTH <= len(lobby) <= LOBBY_ID_MAX_LENGTH:
+        if not lobby.isdecimal() or not LOBBY_ID_MIN_LENGTH <= len(lobby) <= LOBBY_ID_MAX_LENGTH:
             return await interaction.response.send_message(
                 f"The Lobby ID must be {LOBBY_ID_MIN_LENGTH} to {LOBBY_ID_MAX_LENGTH} numbers.",
                 ephemeral=True,
             )
+        max_players, players_error = modal.read_max_players()
+        if players_error:
+            return await interaction.response.send_message(players_error, ephemeral=True)
         try:
-            max_players = modal.max_players_field.component.values[0]
             gamemode = modal.gamemode_field.component.values[0]
         except IndexError:
             return await interaction.response.send_message(
@@ -1292,7 +1408,9 @@ class LFG(commands.Cog):
 
         draft = {
             "lobby": lobby,
-            "notes": self.sanitize_notes(modal.notes_field.component.value or None),
+            "notes": self.sanitize_notes(
+                modal.notes_field.component.value or None, allow_links=modal.is_modded
+            ),
             "mandatory": {
                 "Max Players": max_players,
                 "Gamemode": gamemode,
@@ -1322,7 +1440,7 @@ class LFG(commands.Cog):
         panel_view = modal2.panel_view
 
         first_to_raw = str(modal2.first_to_field.component.value or "").strip()
-        if first_to_raw and (not first_to_raw.isdigit() or not 1 <= int(first_to_raw) <= 50):
+        if first_to_raw and (not first_to_raw.isdecimal() or not 1 <= int(first_to_raw) <= 50):
             return await interaction.response.send_message(
                 "First To must be a number from 1 to 50. Nothing was saved; use"
                 " the draft panel to try again.",
@@ -1547,11 +1665,12 @@ class LFG(commands.Cog):
         description = (
             "There are two ways to post a lobby. Everything stays private to "
             f"you until your post goes live in <#{self.NEW_LFG_CHANNEL_ID}>.\n\n"
-            "**Streamlined (slash commands):** one form with every setting on "
-            "a single page. Fastest once you know your way around.\n"
+            "**Streamlined (slash commands):** one quick form on a single "
+            "page. Fastest once you know your way around.\n"
             "**/lfg**: post a vanilla lobby.\n"
             "**/lfgmod**: post a modded lobby. Please list your mods in the "
-            "Notes field!\n\n"
+            "Notes field! To set First To on a modded lobby, use the Modded "
+            "LFG button below.\n\n"
             "**Detailed (buttons below):** a guided setup. Fill in the "
             "essentials first, then choose Post Now or add optional settings "
             "(First To, Lobby Type, Friendly Fire and more) on a second page. "
@@ -1830,9 +1949,10 @@ class LFG(commands.Cog):
     @app_commands.command(name="lfgmod", description="Post a modded LFG to #new-lfg")
     @app_commands.guild_only()
     async def slash_lfgmod(self, interaction: discord.Interaction):
-        """Carbon copy of /lfg for modded lobbies: same streamlined single
-        modal, same gate, same shared cooldown, same destination; the post is
-        tagged Modded Lobby: Yes."""
+        """Same streamlined pipeline as /lfg for modded lobbies, with Max
+        Players as a numerical input (2 to 10), Gamemode as its own radio
+        group, and no First To field (available via the Modded LFG button);
+        the post is tagged Modded Lobby: Yes."""
         await self._launch_lfg_modal(
             interaction,
             destination_id=self.NEW_LFG_CHANNEL_ID,
