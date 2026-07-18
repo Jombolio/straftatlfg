@@ -92,14 +92,21 @@ class LFGPostModal(discord.ui.Modal, title="Post an LFG"):
                     required=True,
                 ),
             )
+        gamemode_options = [
+            discord.SelectOption(label="FFA"),
+            discord.SelectOption(label="Teams"),
+        ]
+        if is_modded:
+            # Alternative gamemodes are a popular category of mods.
+            gamemode_options.append(discord.SelectOption(label="Modded Gamemode"))
+            gamemode_placeholder = "FFA, Teams, or Modded Gamemode?"
+        else:
+            gamemode_placeholder = "FFA or Teams?"
         self.gamemode_field = discord.ui.Label(
             text="Gamemode",
             component=discord.ui.Select(
-                placeholder="FFA or Teams?",
-                options=[
-                    discord.SelectOption(label="FFA"),
-                    discord.SelectOption(label="Teams"),
-                ],
+                placeholder=gamemode_placeholder,
+                options=gamemode_options,
                 required=True,
             ),
         )
@@ -107,10 +114,11 @@ class LFGPostModal(discord.ui.Modal, title="Post an LFG"):
             text="Weapon Randomizer",
             description="Optional. Leave empty to skip.",
             component=discord.ui.Select(
-                placeholder="Fully Random, Custom, or No?",
+                placeholder="Full Randomize, Swapped, Custom Randomize, or No?",
                 options=[
-                    discord.SelectOption(label="Fully Random"),
-                    discord.SelectOption(label="Custom"),
+                    discord.SelectOption(label="Full Randomize"),
+                    discord.SelectOption(label="Swapped"),
+                    discord.SelectOption(label="Custom Randomize"),
                     discord.SelectOption(label="No"),
                 ],
                 required=False,
@@ -235,6 +243,8 @@ class LFGFusedModal(discord.ui.Modal, title="Post an LFG"):
                     options=[
                         discord.RadioGroupOption(label="FFA", value="FFA"),
                         discord.RadioGroupOption(label="Teams", value="Teams"),
+                        # Alternative gamemodes are a popular category of mods.
+                        discord.RadioGroupOption(label="Modded Gamemode", value="Modded Gamemode"),
                     ],
                     required=True,
                 ),
@@ -260,11 +270,12 @@ class LFGFusedModal(discord.ui.Modal, title="Post an LFG"):
             component=discord.ui.Select(
                 placeholder="Randomizer, lobby type, friendly fire and more",
                 min_values=0,
-                max_values=12,
+                max_values=13,
                 required=False,
                 options=[
-                    discord.SelectOption(label="Weapon Randomizer: Fully Random", value="Weapon Randomizer|Fully Random"),
-                    discord.SelectOption(label="Weapon Randomizer: Custom", value="Weapon Randomizer|Custom"),
+                    discord.SelectOption(label="Weapon Randomizer: Full Randomize", value="Weapon Randomizer|Full Randomize"),
+                    discord.SelectOption(label="Weapon Randomizer: Swapped", value="Weapon Randomizer|Swapped"),
+                    discord.SelectOption(label="Weapon Randomizer: Custom Randomize", value="Weapon Randomizer|Custom Randomize"),
                     discord.SelectOption(label="Weapon Randomizer: No", value="Weapon Randomizer|No"),
                     discord.SelectOption(label="Lobby Type: Public", value="Lobby Type|Public"),
                     discord.SelectOption(label="Lobby Type: Invite Only", value="Lobby Type|Invite Only"),
