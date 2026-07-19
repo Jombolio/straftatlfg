@@ -68,16 +68,19 @@ def _update_select_options(values, stored):
 
 
 class LFGPostModal(discord.ui.Modal, title="Post an LFG"):
-    """Stage one of the guided two-modal bridge: the sticky quick-post
-    buttons and the /testlfg + /testlfgmod testers. The slash commands use
-    the streamlined LFGFusedModal instead.
+    """The one posting form, shared by every surface with two submit modes.
+
+    chained=True (the sticky guided-post buttons): submitting stashes a
+    draft on an ephemeral panel offering Post Now or an Optional Settings
+    modal with the remaining five settings (Discord cannot open a modal from
+    a modal submission, hence the button bridge). chained=False (/lfg and
+    /lfgmod): submitting posts
+    immediately with just this form's fields; optional settings can be added
+    afterwards via /lfgupdate.
 
     Discord hard-caps modals at 5 top-level components, so the modal carries
     the mandatory fields (Lobby ID, Max Players, Gamemode), the optional
-    Weapon Randomizer select, and Notes. Submitting stashes a draft on an
-    ephemeral panel offering Post Now or an Optional Settings modal with the
-    remaining five settings (Discord cannot open a modal from a modal
-    submission, hence the button bridge). Moddedness is derived from the
+    Weapon Randomizer select, and Notes. Moddedness is derived from the
     invoking command (is_modded), never asked in the form. Vanilla offers
     Max Players as a 2/3/4 select; modded lobbies support up to 10 players,
     so their variant uses a numerical text input validated server-side
@@ -90,10 +93,8 @@ class LFGPostModal(discord.ui.Modal, title="Post an LFG"):
         cog,
         destination_id: int,
         is_modded: bool,
-        enforce_gate: bool,
-        enforce_cooldown: bool,
-        silent_ping: bool,
         optional_settings: Optional[Dict[str, Optional[str]]] = None,
+        chained: bool = True,
     ):
         # Moddedness is derived from the invoking command (/lfgmod vs /lfg),
         # never asked in the form; the title tells the invoker which one opened.
@@ -101,13 +102,14 @@ class LFGPostModal(discord.ui.Modal, title="Post an LFG"):
         self.cog = cog
         self.destination_id = destination_id
         self.is_modded = is_modded
-        self.enforce_gate = enforce_gate
-        self.enforce_cooldown = enforce_cooldown
-        self.silent_ping = silent_ping
         # Display name -> value placeholders for the optional settings; stage
-        # two fills a copy at post time (stable display order). Stage one never
-        # commits the cooldown, so there is nothing here to refund on error.
+        # two fills a copy at post time (stable display order).
         self.optional_settings: Dict[str, Optional[str]] = optional_settings or {}
+        self.chained = chained
+        # Direct mode only: set when this submission consumed the cooldown;
+        # cleared the moment the post lands so a late failure can never
+        # refund a live post. Stage one (chained) never commits.
+        self.committed_stamp: Optional[float] = None
 
         self.lobby_id_field = discord.ui.Label(
             text="Lobby ID",
@@ -209,209 +211,13 @@ class LFGPostModal(discord.ui.Modal, title="Post an LFG"):
         return component.values[0], None
 
     async def on_submit(self, interaction: discord.Interaction):
-        await self.cog.handle_lfg_stage_one(interaction, self)
+        if self.chained:
+            await self.cog.handle_lfg_stage_one(interaction, self)
+        else:
+            await self.cog.handle_direct_submit(interaction, self)
 
     async def on_error(self, interaction: discord.Interaction, error: Exception):
         log.exception("LFGPostModal submission failed", exc_info=error)
-        try:
-            msg = "Something went wrong. Please try again."
-            if interaction.response.is_done():
-                await interaction.followup.send(msg, ephemeral=True)
-            else:
-                await interaction.response.send_message(msg, ephemeral=True)
-        except discord.HTTPException:
-            pass
-
-
-class LFGFusedModal(discord.ui.Modal, title="Post an LFG"):
-    """The streamlined single-modal flow behind /lfg and /lfgmod.
-
-    Everything compressed into Discord's 5-component modal cap. Vanilla
-    (Revision 16 layout): Lobby ID, the Max Players x Gamemode cross-product
-    as a 6-option radio group, the packed optional-settings multi-select,
-    First To, Notes. Modded (Revision 18 layout): Max Players is a numerical
-    text input validated server-side (2 to 10) with Gamemode as its own
-    radio group, which costs a slot, so the modded variant has no First To
-    field (it remains available on the detailed button tier). Fields are
-    built in __init__ (the documented alternative to class-level Labels) so
-    the two variants can differ. Discord cannot enforce one-per-category
-    inside the packed select, so exclusivity is validated server-side on
-    submit and a conflict is refused ephemerally before anything is consumed.
-    The sticky buttons keep the guided two-modal bridge (LFGPostModal) as the
-    detailed alternative.
-    """
-
-    PACKED_OPTIONS = (
-        ("Weapon Randomizer", "Full Randomize"),
-        ("Weapon Randomizer", "Swapped"),
-        ("Weapon Randomizer", "Custom Randomize"),
-        ("Weapon Randomizer", "No"),
-        ("Lobby Type", "Public"),
-        ("Lobby Type", "Invite Only"),
-        ("Lobby Type", "Private"),
-        ("Friendly Fire", "Enabled"),
-        ("Friendly Fire", "Disabled"),
-        ("Mid-Match Joining", "Yes"),
-        ("Mid-Match Joining", "No"),
-        ("Enemy Outlines", "Enabled"),
-        ("Enemy Outlines", "Disabled"),
-    )
-
-    def __init__(
-        self,
-        cog,
-        destination_id: int,
-        is_modded: bool,
-        enforce_gate: bool,
-        enforce_cooldown: bool,
-        silent_ping: bool,
-    ):
-        super().__init__(title="Post a Modded LFG" if is_modded else "Post an LFG")
-        self.cog = cog
-        self.destination_id = destination_id
-        self.is_modded = is_modded
-        self.enforce_gate = enforce_gate
-        self.enforce_cooldown = enforce_cooldown
-        self.silent_ping = silent_ping
-        # Set when this submission consumed the cooldown; cleared the moment
-        # the post lands so a late failure can never refund a live post.
-        self.committed_stamp: Optional[float] = None
-
-        self.lobby_id_field = discord.ui.Label(
-            text="Lobby ID",
-            description=f"Numbers only, {LOBBY_ID_MIN_LENGTH} to {LOBBY_ID_MAX_LENGTH} digits",
-            component=discord.ui.TextInput(
-                placeholder="12345678",
-                min_length=LOBBY_ID_MIN_LENGTH,
-                max_length=LOBBY_ID_MAX_LENGTH,
-                required=True,
-            ),
-        )
-        if is_modded:
-            # Modded lobbies support up to 10 players. A cross-product would
-            # need 18 options (over the radio group's 10-option cap), so Max
-            # Players becomes a numerical input and Gamemode its own radio
-            # group. The extra slot comes from dropping First To, which stays
-            # available on the detailed button tier and via /lfgupdate.
-            self.core_field = None
-            self.max_players_field = discord.ui.Label(
-                text="Max Players",
-                description="A number from 2 to 10",
-                component=discord.ui.TextInput(placeholder="10", max_length=2, required=True),
-            )
-            self.gamemode_field = discord.ui.Label(
-                text="Gamemode",
-                component=discord.ui.RadioGroup(
-                    options=[
-                        # Modded Gamemode: alternative modes are a popular mod category.
-                        discord.RadioGroupOption(label=mode, value=mode)
-                        for mode in ("FFA", "Teams", "Modded Gamemode")
-                    ],
-                    required=True,
-                ),
-            )
-        else:
-            self.max_players_field = None
-            self.gamemode_field = None
-            self.core_field = discord.ui.Label(
-                text="Lobby Setup",
-                description="Max players and gamemode",
-                component=discord.ui.RadioGroup(
-                    options=[
-                        discord.RadioGroupOption(label=f"{n} players, {mode}", value=f"{n}|{mode}")
-                        for n in (2, 3, 4)
-                        for mode in ("FFA", "Teams")
-                    ],
-                    required=True,
-                ),
-            )
-        self.settings_field = discord.ui.Label(
-            text="Optional Settings",
-            description="Pick at most one option per category",
-            component=discord.ui.Select(
-                placeholder="Randomizer, lobby type, friendly fire and more",
-                min_values=0,
-                max_values=len(self.PACKED_OPTIONS),
-                required=False,
-                options=[
-                    discord.SelectOption(label=f"{group}: {value}", value=f"{group}|{value}")
-                    for group, value in self.PACKED_OPTIONS
-                ],
-            ),
-        )
-        if is_modded:
-            self.first_to_field = None
-        else:
-            self.first_to_field = discord.ui.Label(
-                text="First To",
-                description="Optional. First to how many wins? 1 to 50.",
-                component=discord.ui.TextInput(placeholder="10", max_length=2, required=False),
-            )
-        if is_modded:
-            notes_description = f"Optional, but please list the mods your lobby is running! Max {NOTES_MAX_LENGTH} characters."
-            notes_placeholder = "Which mods are you using? Anything else to note?"
-        else:
-            notes_description = f"Optional. Casual? Competitive? Anything else! Max {NOTES_MAX_LENGTH} characters."
-            notes_placeholder = None
-        self.notes_field = discord.ui.Label(
-            text="Notes",
-            description=notes_description,
-            component=discord.ui.TextInput(
-                style=discord.TextStyle.paragraph,
-                max_length=NOTES_MAX_LENGTH,
-                required=False,
-                placeholder=notes_placeholder,
-            ),
-        )
-        if is_modded:
-            fields = (
-                self.lobby_id_field,
-                self.max_players_field,
-                self.gamemode_field,
-                self.settings_field,
-                self.notes_field,
-            )
-        else:
-            fields = (
-                self.lobby_id_field,
-                self.core_field,
-                self.settings_field,
-                self.first_to_field,
-                self.notes_field,
-            )
-        for field in fields:
-            self.add_item(field)
-
-    def read_core(self) -> Tuple[Optional[str], Optional[str], Optional[str]]:
-        """(max_players, gamemode, error_message) for either variant of the
-        fused posting layout (the update Essentials modal has its own reader
-        for its posting-form-style split fields)."""
-        if self.is_modded:
-            raw = str(self.max_players_field.component.value or "").strip()
-            if not raw.isdecimal() or not 2 <= int(raw) <= 10:
-                return None, None, "Max Players must be a number from 2 to 10."
-            gamemode = self.gamemode_field.component.value
-            if not gamemode:
-                return None, None, "A required selection is missing. Please try again."
-            return str(int(raw)), gamemode, None
-        value = self.core_field.component.value
-        if not value:
-            return None, None, "A required selection is missing. Please try again."
-        max_players, _, gamemode = value.partition("|")
-        return max_players, gamemode, None
-
-    def first_to_raw(self) -> str:
-        """The First To entry, or an empty string on the modded variant,
-        which has no First To field."""
-        if self.first_to_field is None:
-            return ""
-        return str(self.first_to_field.component.value or "").strip()
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await self.cog.handle_fused_submit(interaction, self)
-
-    async def on_error(self, interaction: discord.Interaction, error: Exception):
-        log.exception("LFGFusedModal submission failed", exc_info=error)
         if self.committed_stamp is not None:
             try:
                 await self.cog.refund_cooldown(interaction.user, self.committed_stamp)
@@ -428,9 +234,10 @@ class LFGFusedModal(discord.ui.Modal, title="Post an LFG"):
 
 
 class LFGOptionalSettingsModal(discord.ui.Modal, title="Optional Lobby Settings"):
-    """Stage two of the guided two-modal bridge (sticky buttons and test
-    commands): the five optional lobby settings. Submitting posts the draft
-    immediately. The slash commands carry these in their fused modal instead."""
+    """Stage two of the guided two-modal bridge (sticky buttons): the five
+    optional lobby settings. Submitting posts the draft immediately. The
+    slash commands skip this page and post directly; their optional settings
+    are added afterwards via /lfgupdate."""
 
     first_to_field = discord.ui.Label(
         text="First To",
@@ -504,15 +311,15 @@ class LFGOptionalSettingsModal(discord.ui.Modal, title="Optional Lobby Settings"
 
 
 class LFGDraftPanelView(discord.ui.View):
-    """The ephemeral bridge between the two guided modals (sticky buttons and
-    test commands; the slash commands use the fused single modal instead).
+    """The ephemeral bridge between the two guided modals (sticky buttons;
+    the slash commands post directly on submit instead).
 
     Discord cannot open a modal in response to a modal submission, so stage
     one's submit lands here: an ephemeral panel whose buttons either post the
     draft immediately or open the optional-settings modal (button clicks are
     component interactions, which CAN open modals). The draft lives on this
-    view instance only; a bot restart discards it and the admin re-runs the
-    command. Ephemeral messages are only visible and interactable to the
+    view instance only; a bot restart discards it and the member clicks the
+    button again. Ephemeral messages are only visible and interactable to the
     invoker, so no extra ownership check is needed.
     """
 
@@ -593,8 +400,7 @@ class LFGUpdateEssentialsModal(discord.ui.Modal, title="Edit Essentials"):
             ),
         )
         # Mirror the posting form exactly: separate Max Players and Gamemode
-        # controls per variant, never the fused modal's cross-product radio
-        # (that layout exists only because the slash form has no spare slots).
+        # controls per variant, matching what the member filled in originally.
         if is_modded:
             self.max_players_field = discord.ui.Label(
                 text="Max Players",
@@ -715,8 +521,8 @@ class LFGUpdateOptionalModal(discord.ui.Modal, title="Edit Optional Settings"):
     To plus one labeled dropdown per category, each prefilled with the post's
     current state and carrying a 'Not set' entry for explicit removal. Weapon
     Randomizer lives on the Edit Essentials form, matching where it sits when
-    posting. Available on both variants, so modded posts can set First To
-    here even though their posting form has no room for the field."""
+    posting. No posting form carries First To, so this modal (and the guided
+    flow's stage two) is where any post gains it."""
 
     def __init__(self, cog, panel):
         super().__init__(title="Edit Optional Settings")
@@ -954,11 +760,11 @@ class LFGStickyView(discord.ui.View):
     timeout=None + stable custom_ids, registered once per cog load via
     bot.add_view, so one registration serves every sticky in every channel
     and the buttons keep working across restarts with zero per-message
-    bookkeeping. The LFG and Modded LFG buttons open the detailed tier: the
-    guided two-modal bridge (essentials modal, then Post Now or an Optional
-    Settings page), with the same region gate, shared cooldown, and
-    destination as the streamlined slash commands. The Update Last LFG button
-    opens the same ephemeral management panel as /lfgupdate.
+    bookkeeping. The LFG and Modded LFG buttons open the guided path: the
+    posting form, then Post Now or an Optional Settings page. Same form,
+    region gate, shared cooldown, and destination as the direct-posting
+    slash commands. The Update Last LFG button opens the same ephemeral
+    management panel as /lfgupdate.
     """
 
     def __init__(self, cog):
@@ -1697,98 +1503,65 @@ class LFG(commands.Cog):
         if self._cooldown_cache.get(key) == stamp:
             del self._cooldown_cache[key]
 
-    # -- The streamlined single-modal flow (/lfg, /lfgmod) and the ------------
+    # -- The direct posting flow (/lfg, /lfgmod) and the ----------------------
     # -- /lfgupdate management panel ------------------------------------------
 
-    def _read_fused_form(self, modal: LFGFusedModal):
-        """Parse and validate a fused-modal submission for either variant.
-        Returns (form, error_message); nothing is consumed on a validation
-        failure. form carries lobby, max_players, gamemode, first_to (None
-        when empty or when the modded variant lacks the field), picked
-        (category -> value from the packed select, conflict-checked), notes
-        (sanitized), and has_first_to_field."""
-        lobby = str(modal.lobby_id_field.component.value or "").strip()
-        if not lobby.isdecimal() or not LOBBY_ID_MIN_LENGTH <= len(lobby) <= LOBBY_ID_MAX_LENGTH:
-            return None, (
-                f"The Lobby ID must be {LOBBY_ID_MIN_LENGTH} to {LOBBY_ID_MAX_LENGTH} numbers."
-            )
-        max_players, gamemode, core_error = modal.read_core()
-        if core_error:
-            return None, core_error
-        first_to_raw = modal.first_to_raw()
-        if first_to_raw and (not first_to_raw.isdecimal() or not 1 <= int(first_to_raw) <= 50):
-            return None, "First To must be a number from 1 to 50."
-        # The packed multi-select: Discord cannot enforce one-per-category, so
-        # exclusivity is validated here.
-        picked: Dict[str, str] = {}
-        conflicts = []
-        for raw in modal.settings_field.component.values:
-            group, _, value = raw.partition("|")
-            if group in picked and group not in conflicts:
-                conflicts.append(group)
-            picked[group] = value
-        if conflicts:
-            return None, (
-                "Pick at most one option per category. You picked more than one"
-                f" for: {', '.join(conflicts)}. Please run the command again."
-            )
-        return {
-            "lobby": lobby,
-            "max_players": max_players,
-            "gamemode": gamemode,
-            "first_to": str(int(first_to_raw)) if first_to_raw else None,
-            "picked": picked,
-            "notes": self.sanitize_notes(
-                modal.notes_field.component.value or None, allow_links=modal.is_modded
-            ),
-            "has_first_to_field": modal.first_to_field is not None,
-        }, None
-
-    async def handle_fused_submit(self, interaction: discord.Interaction, modal: LFGFusedModal):
-        """The streamlined pipeline: everything in one modal, posted on submit.
-        The ordering invariants of REFACTOR_PLAN.md section 4.4 apply directly:
-        every validation precedes the gate, the gate precedes the cooldown
-        commit, and the commit immediately precedes the send with refund on
-        any committed-but-unsent failure."""
+    async def handle_direct_submit(self, interaction: discord.Interaction, modal: LFGPostModal):
+        """The slash commands' pipeline: the same form as the sticky buttons,
+        posted immediately on submit. Optional settings start unset and can
+        be added afterwards via /lfgupdate. The ordering invariants of
+        REFACTOR_PLAN.md section 4.4 apply: every validation precedes the
+        gate, the gate precedes the cooldown commit, and the commit
+        immediately precedes the send with refund on any committed-but-unsent
+        failure."""
         member = interaction.user
 
         if self._is_lfg_blocked(member):
             return await interaction.response.send_message(self.LFG_BLOCKED_MESSAGE, ephemeral=True)
 
         # Validation: nothing is consumed on any failure here.
-        form, form_error = self._read_fused_form(modal)
-        if form_error:
-            return await interaction.response.send_message(form_error, ephemeral=True)
-        lobby = form["lobby"]
-        notes = form["notes"]
+        lobby = str(modal.lobby_id_field.component.value or "").strip()
+        if not lobby.isdecimal() or not LOBBY_ID_MIN_LENGTH <= len(lobby) <= LOBBY_ID_MAX_LENGTH:
+            return await interaction.response.send_message(
+                f"The Lobby ID must be {LOBBY_ID_MIN_LENGTH} to {LOBBY_ID_MAX_LENGTH} numbers.",
+                ephemeral=True,
+            )
+        max_players, players_error = modal.read_max_players()
+        if players_error:
+            return await interaction.response.send_message(players_error, ephemeral=True)
+        gamemode_values = modal.gamemode_field.component.values
+        if not gamemode_values:
+            return await interaction.response.send_message(
+                "A required selection is missing. Please try again.", ephemeral=True
+            )
+        gamemode = gamemode_values[0]
+        randomizer_values = modal.randomizer_field.component.values
+        randomizer = randomizer_values[0] if randomizer_values else None
+        notes = self.sanitize_notes(
+            modal.notes_field.component.value or None, allow_links=modal.is_modded
+        )
 
         region = self.get_member_region(member)
-        if modal.enforce_gate and region is None:
+        if region is None:
             return await interaction.response.send_message(self._region_gate_message(), ephemeral=True)
 
-        optional = self._blank_optional_settings()
-        optional["First To"] = form["first_to"]
-        for group, value in form["picked"].items():
-            optional[group] = value
         settings: Dict[str, str] = {
-            "Max Players": form["max_players"],
-            "Gamemode": form["gamemode"],
+            "Max Players": max_players,
+            "Gamemode": gamemode,
             "Modded Lobby": "Yes" if modal.is_modded else "No",
         }
-        for name, value in optional.items():
-            if value is not None:
-                settings[name] = value
+        if randomizer is not None:
+            settings["Weapon Randomizer"] = randomizer
 
         # Cooldown: cache-warm from Config, then atomic check-and-stamp.
-        if modal.enforce_cooldown:
-            await self.check_cooldown(member)
-            stamp = self.commit_cooldown_sync(member)
-            if stamp is None:
-                remaining = await self.check_cooldown(member)
-                return await interaction.response.send_message(
-                    f"You can post again in {max(1, round(remaining))}s.", ephemeral=True
-                )
-            modal.committed_stamp = stamp
+        await self.check_cooldown(member)
+        stamp = self.commit_cooldown_sync(member)
+        if stamp is None:
+            remaining = await self.check_cooldown(member)
+            return await interaction.response.send_message(
+                f"You can post again in {max(1, round(remaining))}s.", ephemeral=True
+            )
+        modal.committed_stamp = stamp
 
         await interaction.response.defer(ephemeral=True, thinking=True)
 
@@ -1806,14 +1579,11 @@ class LFG(commands.Cog):
         embed = self.build_lfg_embed(
             member, lobby, notes, region=region, settings=settings, is_modded=modal.is_modded
         )
-        if modal.silent_ping:
-            mentions = discord.AllowedMentions.none()
-        else:
-            mentions = discord.AllowedMentions(roles=[role])
+        mentions = discord.AllowedMentions(roles=[role])
         try:
             message = await channel.send(content=role.mention, embed=embed, allowed_mentions=mentions)
         except discord.HTTPException:
-            log.exception("Failed to send fused LFG post to channel %s", modal.destination_id)
+            log.exception("Failed to send LFG post to channel %s", modal.destination_id)
             if modal.committed_stamp is not None:
                 await self.refund_cooldown(member, modal.committed_stamp)
                 modal.committed_stamp = None
@@ -2119,7 +1889,7 @@ class LFG(commands.Cog):
         finally:
             panel.busy = False
 
-    # -- The guided two-modal bridge (sticky buttons + test commands) ---------
+    # -- The guided two-modal bridge (sticky buttons) -------------------------
 
     async def handle_lfg_stage_one(self, interaction: discord.Interaction, modal: LFGPostModal):
         """Chained stage one: validate the mandatory form, stash a draft on an
@@ -2144,16 +1914,15 @@ class LFG(commands.Cog):
             return await interaction.response.send_message(
                 "A required selection is missing. Please try again.", ephemeral=True
             )
-        if modal.enforce_gate and self.get_member_region(member) is None:
+        if self.get_member_region(member) is None:
             return await interaction.response.send_message(self._region_gate_message(), ephemeral=True)
-        if modal.enforce_cooldown:
-            # Peek only: the commit happens at the actual post moment in
-            # finalize_chained_post, so an abandoned draft costs nothing.
-            remaining = await self.check_cooldown(member)
-            if remaining > 0:
-                return await interaction.response.send_message(
-                    f"You can post again in {max(1, round(remaining))}s.", ephemeral=True
-                )
+        # Peek only: the commit happens at the actual post moment in
+        # finalize_chained_post, so an abandoned draft costs nothing.
+        remaining = await self.check_cooldown(member)
+        if remaining > 0:
+            return await interaction.response.send_message(
+                f"You can post again in {max(1, round(remaining))}s.", ephemeral=True
+            )
 
         randomizer_values = modal.randomizer_field.component.values
         randomizer = randomizer_values[0] if randomizer_values else None
@@ -2173,10 +1942,7 @@ class LFG(commands.Cog):
             },
             "optional": optional,
             "destination_id": modal.destination_id,
-            "silent_ping": modal.silent_ping,
             "is_modded": modal.is_modded,
-            "enforce_gate": modal.enforce_gate,
-            "enforce_cooldown": modal.enforce_cooldown,
         }
         view = LFGDraftPanelView(self, draft)
         await interaction.response.send_message(
@@ -2238,7 +2004,7 @@ class LFG(commands.Cog):
         The gate re-check and the cooldown check-and-commit happen HERE, at
         the actual post moment (Revision 14): an abandoned draft never
         consumes the cooldown, a failed send refunds it, and a live post
-        never gets it refunded. Test commands set the enforce flags False."""
+        never gets it refunded."""
         draft = panel_view.draft
         member = interaction.user
 
@@ -2271,7 +2037,7 @@ class LFG(commands.Cog):
             # Authoritative gate re-check at the post moment (roles can change
             # while the panel sits); the region that passed is what renders.
             region = self.get_member_region(member)
-            if draft["enforce_gate"] and region is None:
+            if region is None:
                 msg = self._region_gate_message()
                 if not from_panel:
                     msg += " Your optional settings were not saved; use the draft panel to try again."
@@ -2280,16 +2046,15 @@ class LFG(commands.Cog):
             # Cooldown: cache-warm, then atomic check-and-stamp (no await
             # between check and stamp), committed at the actual post moment so
             # abandoned drafts never consume it. The ordering invariants of
-            # REFACTOR_PLAN.md section 4.4 live here and in handle_fused_submit.
-            if draft["enforce_cooldown"]:
-                await self.check_cooldown(member)
-                stamp = self.commit_cooldown_sync(member)
-                if stamp is None:
-                    remaining = await self.check_cooldown(member)
-                    msg = f"You can post again in {max(1, round(remaining))}s."
-                    if not from_panel:
-                        msg += " Your optional settings were not saved; use the draft panel to try again."
-                    return await interaction.response.send_message(msg, ephemeral=True)
+            # REFACTOR_PLAN.md section 4.4 live here and in handle_direct_submit.
+            await self.check_cooldown(member)
+            stamp = self.commit_cooldown_sync(member)
+            if stamp is None:
+                remaining = await self.check_cooldown(member)
+                msg = f"You can post again in {max(1, round(remaining))}s."
+                if not from_panel:
+                    msg += " Your optional settings were not saved; use the draft panel to try again."
+                return await interaction.response.send_message(msg, ephemeral=True)
 
             if from_panel:
                 await interaction.response.defer()
@@ -2298,7 +2063,7 @@ class LFG(commands.Cog):
 
             async def report_failure(msg: str):
                 if from_panel:
-                    # Keep the panel and its buttons alive so the admin can retry.
+                    # Keep the panel and its buttons alive so the member can retry.
                     try:
                         await interaction.edit_original_response(content=msg, view=panel_view)
                     except discord.HTTPException:
@@ -2332,10 +2097,7 @@ class LFG(commands.Cog):
                 settings=settings,
                 is_modded=draft["is_modded"],
             )
-            if draft["silent_ping"]:
-                mentions = discord.AllowedMentions.none()
-            else:
-                mentions = discord.AllowedMentions(roles=[role])
+            mentions = discord.AllowedMentions(roles=[role])
 
             try:
                 message = await channel.send(content=role.mention, embed=embed, allowed_mentions=mentions)
@@ -2357,18 +2119,16 @@ class LFG(commands.Cog):
                     await self.config.member(member).last_lfg_ts.set(stamp)
                 except Exception:
                     log.exception("Failed to persist LFG cooldown stamp")
-            if not draft["silent_ping"]:
-                # Test posts (silent) are not update targets.
-                await self._record_last_post(
-                    member, message, draft["is_modded"], draft["lobby"], draft["notes"], settings
-                )
+            await self._record_last_post(
+                member, message, draft["is_modded"], draft["lobby"], draft["notes"], settings
+            )
             confirmation = f"Posted! [Jump to your LFG]({message.jump_url}) | Lobby ID: `{draft['lobby']}`"
             if from_panel:
                 try:
                     await interaction.edit_original_response(content=confirmation, view=None)
                 except discord.HTTPException:
                     log.exception("Failed to edit the draft panel with the confirmation")
-                    # The post IS live; make sure the admin hears about it.
+                    # The post IS live; make sure the member hears about it.
                     try:
                         await interaction.followup.send(confirmation, ephemeral=True)
                     except discord.HTTPException:
@@ -2403,17 +2163,14 @@ class LFG(commands.Cog):
     # -- New-system sticky with quick-post buttons ----------------------------
 
     async def handle_sticky_button(self, interaction: discord.Interaction, *, is_modded: bool):
-        """The detailed path from the sticky buttons: the guided two-modal
-        bridge (essentials modal, then Post Now or an Optional Settings
-        modal). Same gate, same shared cooldown, and same destination as the
-        streamlined slash commands."""
+        """The guided path from the sticky buttons: the posting form, then
+        Post Now or an Optional Settings modal. Same form, same gate, same
+        shared cooldown, and same destination as the direct-posting slash
+        commands."""
         await self._launch_lfg_modal(
             interaction,
             destination_id=self.NEW_LFG_CHANNEL_ID,
             is_modded=is_modded,
-            enforce_gate=True,
-            enforce_cooldown=True,
-            silent_ping=False,
             optional_settings=self._blank_optional_settings(),
         )
 
@@ -2425,20 +2182,20 @@ class LFG(commands.Cog):
         description = (
             "There are two ways to post a lobby. Everything stays private to "
             f"you until your post goes live in <#{self.NEW_LFG_CHANNEL_ID}>.\n\n"
-            "**Streamlined (slash commands):** one quick form on a single "
-            "page. Fastest once you know your way around.\n"
+            "**Quick post (slash commands):** the same form as the buttons "
+            "below, posted the moment you submit it. Fastest once you know "
+            "your way around.\n"
             "**/lfg**: post a vanilla lobby.\n"
             "**/lfgmod**: post a modded lobby. Please list your mods in the "
-            "Notes field! To set First To on a modded lobby, use the Modded "
-            "LFG button below.\n"
-            "**/lfgupdate**: manage your last posted LFG. Edit its details or "
-            "delete it. No new ping is sent. The Update Last LFG button below "
-            "does the same.\n\n"
-            "**Detailed (buttons below):** a guided setup. Fill in the "
-            "essentials first, then choose Post Now or add optional settings "
+            "Notes field!\n"
+            "**/lfgupdate**: manage your last posted LFG. Edit its details, "
+            "add optional settings, or delete it. No new ping is sent. The "
+            "Update Last LFG button below does the same.\n\n"
+            "**Guided post (buttons below):** the same form, but after "
+            "submitting you can choose Post Now or add optional settings "
             "(First To, Lobby Type, Friendly Fire and more) on a second page. "
             "Great if it is your first time posting.\n\n"
-            "**/lfgpings**: toggle the LFG ping role to get notified about new "
+            "**/pinglfg**: toggle the LFG ping role to get notified about new "
             "lobbies.\n\n"
             f"{region_line}"
         )
@@ -2536,10 +2293,10 @@ class LFG(commands.Cog):
         sticky message by hand does not disable it; the sticky reposts on the
         next message. Use this command to turn it off.
 
-        The sticky explains the streamlined slash commands (/lfg, /lfgmod,
-        /lfgpings, /lfgupdate) and carries three buttons: LFG and Modded LFG
-        open the detailed guided flow (an essentials modal, then Post Now or
-        an Optional Settings page), and Update Last LFG opens the /lfgupdate
+        The sticky explains the quick-post slash commands (/lfg, /lfgmod,
+        /pinglfg, /lfgupdate) and carries three buttons: LFG and Modded LFG
+        open the guided flow (the posting form, then Post Now or an Optional
+        Settings page), and Update Last LFG opens the /lfgupdate
         management panel. Administrator only. Cannot be enabled in a channel
         where the legacy sticky is active.
         """
@@ -2651,124 +2408,60 @@ class LFG(commands.Cog):
         *,
         destination_id: int,
         is_modded: bool,
-        enforce_gate: bool,
-        enforce_cooldown: bool,
-        silent_ping: bool,
         optional_settings: Optional[Dict[str, Optional[str]]] = None,
-        fused: bool = False,
+        chained: bool = True,
     ):
         """Shared front door for the /lfg command family: blocklist ->
-        region gate -> cooldown peek -> the modal. fused=True opens the
-        streamlined single modal (slash commands); fused=False opens stage one
-        of the guided two-modal bridge (sticky buttons, test commands). All
-        feedback is ephemeral."""
+        region gate -> cooldown peek -> the one posting modal. chained=True
+        (sticky buttons) submits into the draft panel with its Optional
+        Settings page; chained=False (/lfg, /lfgmod) posts immediately on
+        submit. All feedback is ephemeral."""
         if self._is_lfg_blocked(interaction.user):
             return await interaction.response.send_message(self.LFG_BLOCKED_MESSAGE, ephemeral=True)
-        if enforce_gate and self.get_member_region(interaction.user) is None:
+        if self.get_member_region(interaction.user) is None:
             return await interaction.response.send_message(self._region_gate_message(), ephemeral=True)
-        if enforce_cooldown:
-            remaining = await self.check_cooldown(interaction.user)
-            if remaining > 0:
-                return await interaction.response.send_message(
-                    f"You can post again in {max(1, round(remaining))}s.", ephemeral=True
-                )
-        if fused:
-            modal = LFGFusedModal(
-                self,
-                destination_id=destination_id,
-                is_modded=is_modded,
-                enforce_gate=enforce_gate,
-                enforce_cooldown=enforce_cooldown,
-                silent_ping=silent_ping,
+        remaining = await self.check_cooldown(interaction.user)
+        if remaining > 0:
+            return await interaction.response.send_message(
+                f"You can post again in {max(1, round(remaining))}s.", ephemeral=True
             )
-        else:
-            modal = LFGPostModal(
+        await interaction.response.send_modal(
+            LFGPostModal(
                 self,
                 destination_id=destination_id,
                 is_modded=is_modded,
-                enforce_gate=enforce_gate,
-                enforce_cooldown=enforce_cooldown,
-                silent_ping=silent_ping,
                 optional_settings=optional_settings or self._blank_optional_settings(),
+                chained=chained,
             )
-        await interaction.response.send_modal(modal)
+        )
 
     @app_commands.command(name="lfg", description="Post an LFG to #new-lfg")
     @app_commands.guild_only()
     async def slash_lfg(self, interaction: discord.Interaction):
-        """Vanilla LFG, streamlined: one modal with every setting, posted on
-        submit. The guided step-by-step alternative lives on the sticky
-        buttons. The post is tagged Modded Lobby: No; moddedness is derived
-        from which command was used, never asked in the form."""
+        """Vanilla LFG, streamlined: the same form as the sticky LFG button,
+        posted the moment it is submitted. No Optional Settings page; those
+        can be added afterwards with /lfgupdate. The post is tagged Modded
+        Lobby: No; moddedness is derived from which command was used, never
+        asked in the form."""
         await self._launch_lfg_modal(
             interaction,
             destination_id=self.NEW_LFG_CHANNEL_ID,
             is_modded=False,
-            enforce_gate=True,
-            enforce_cooldown=True,
-            silent_ping=False,
-            fused=True,
+            chained=False,
         )
 
     @app_commands.command(name="lfgmod", description="Post a modded LFG to #new-lfg")
     @app_commands.guild_only()
     async def slash_lfgmod(self, interaction: discord.Interaction):
-        """Same streamlined pipeline as /lfg for modded lobbies, with Max
-        Players as a numerical input (2 to 10), Gamemode as its own radio
-        group, and no First To field (available via the Modded LFG button);
-        the post is tagged Modded Lobby: Yes."""
+        """Same direct pipeline as /lfg for modded lobbies: the same form as
+        the sticky Modded LFG button (numerical Max Players 2 to 10, Modded
+        Gamemode option, link-friendly Notes), posted the moment it is
+        submitted; the post is tagged Modded Lobby: Yes."""
         await self._launch_lfg_modal(
             interaction,
             destination_id=self.NEW_LFG_CHANNEL_ID,
             is_modded=True,
-            enforce_gate=True,
-            enforce_cooldown=True,
-            silent_ping=False,
-            fused=True,
-        )
-
-    @app_commands.command(name="testlfg", description="Admin test of the LFG flow. Posts to the log channel")
-    @app_commands.guild_only()
-    @app_commands.default_permissions(administrator=True)
-    async def slash_testlfg(self, interaction: discord.Interaction):
-        """Tester for the guided two-modal bridge (the sticky buttons' flow,
-        vanilla variant): the mandatory modal, then an ephemeral panel offering
-        Post Now or an Optional Settings modal. Admin-only, posts to the log
-        channel, no region gate, no cooldown, silent role mention."""
-        if not interaction.user.guild_permissions.administrator:
-            return await interaction.response.send_message(
-                "You need the Administrator permission to use this command.", ephemeral=True
-            )
-        await self._launch_lfg_modal(
-            interaction,
-            destination_id=self.TEST_CHANNEL_ID,
-            is_modded=False,
-            enforce_gate=False,
-            enforce_cooldown=False,
-            silent_ping=True,
-            optional_settings=self._blank_optional_settings(),
-        )
-
-    @app_commands.command(name="testlfgmod", description="Admin test of the modded LFG flow. Posts to the log channel")
-    @app_commands.guild_only()
-    @app_commands.default_permissions(administrator=True)
-    async def slash_testlfgmod(self, interaction: discord.Interaction):
-        """Tester for the guided two-modal bridge (the sticky buttons' flow,
-        modded variant): the mandatory modal, then an ephemeral panel offering
-        Post Now or an Optional Settings modal. Admin-only, posts to the log
-        channel, no region gate, no cooldown, silent role mention."""
-        if not interaction.user.guild_permissions.administrator:
-            return await interaction.response.send_message(
-                "You need the Administrator permission to use this command.", ephemeral=True
-            )
-        await self._launch_lfg_modal(
-            interaction,
-            destination_id=self.TEST_CHANNEL_ID,
-            is_modded=True,
-            enforce_gate=False,
-            enforce_cooldown=False,
-            silent_ping=True,
-            optional_settings=self._blank_optional_settings(),
+            chained=False,
         )
 
     async def open_update_panel(self, interaction: discord.Interaction):
@@ -2797,14 +2490,13 @@ class LFG(commands.Cog):
     async def slash_lfgupdate(self, interaction: discord.Interaction):
         """Opens an ephemeral management panel for your last posted LFG:
         edit the essentials (Lobby ID, players, gamemode, notes), adjust the
-        optional settings (including First To, even on modded posts), or
-        delete the post. Edits never re-ping; each edit is subject to the
-        short update cooldown."""
+        optional settings (including First To), or delete the post. Edits
+        never re-ping; each edit is subject to the short update cooldown."""
         await self.open_update_panel(interaction)
 
-    @app_commands.command(name="lfgpings", description="Toggle whether you get pinged for LFG posts")
+    @app_commands.command(name="pinglfg", description="Toggle whether you get pinged for LFG posts")
     @app_commands.guild_only()
-    async def slash_lfgpings(self, interaction: discord.Interaction):
+    async def slash_pinglfg(self, interaction: discord.Interaction):
         if self._is_lfg_blocked(interaction.user):
             return await interaction.response.send_message(self.LFG_BLOCKED_MESSAGE, ephemeral=True)
         now = time.time()
@@ -2821,10 +2513,10 @@ class LFG(commands.Cog):
             )
         try:
             if role in interaction.user.roles:
-                await interaction.user.remove_roles(role, reason="LFG ping toggle (/lfgpings)")
+                await interaction.user.remove_roles(role, reason="LFG ping toggle (/pinglfg)")
                 await interaction.followup.send("You will no longer be pinged for LFG posts.", ephemeral=True)
             else:
-                await interaction.user.add_roles(role, reason="LFG ping toggle (/lfgpings)")
+                await interaction.user.add_roles(role, reason="LFG ping toggle (/pinglfg)")
                 await interaction.followup.send("You will now be pinged for LFG posts.", ephemeral=True)
         except discord.Forbidden:
             await interaction.followup.send(

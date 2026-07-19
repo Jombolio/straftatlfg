@@ -4,7 +4,7 @@
     "short": "Private cog for Straftat Discord Server.",
     "description": "Allows users to post LFG messages pinging the Matchmaking role, restricted to a specific channel and a cooldown.",
     "tags": ["utility", "lfg", "roles"],
-    "min_bot_version": "3.5.23",
+    "min_bot_version": "3.5.21",
     "hidden": false,
     "end_user_data_statement": "This cog stores the timestamp and details of each user's last LFG post to enforce cooldowns and power the /lfgupdate command."
 }
