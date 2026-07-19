@@ -19,9 +19,38 @@ LOBBY_ID_MAX_LENGTH = 20
 
 # Notes field cap, shown in the field copy and enforced client-side.
 # Tightening any of these bounds invalidates stored last_lfg_post prefills;
-# LFGFusedModal drops out-of-bounds defaults defensively so /lfgupdate's
-# modal always opens.
+# the /lfgupdate modals drop out-of-bounds defaults defensively (helpers
+# below) so their forms always open.
 NOTES_MAX_LENGTH = 200
+
+
+def _lobby_prefill(value):
+    """A stored lobby id, or None if it no longer satisfies current bounds."""
+    if (
+        isinstance(value, str)
+        and value.isdecimal()
+        and LOBBY_ID_MIN_LENGTH <= len(value) <= LOBBY_ID_MAX_LENGTH
+    ):
+        return value
+    return None
+
+
+def _players_prefill(value):
+    if isinstance(value, str) and value.isdecimal() and 2 <= int(value) <= 10:
+        return value
+    return None
+
+
+def _first_to_prefill(value):
+    if isinstance(value, str) and value.isdecimal() and 1 <= int(value) <= 50:
+        return value
+    return None
+
+
+def _notes_prefill(value):
+    if isinstance(value, str) and len(value) <= NOTES_MAX_LENGTH:
+        return value
+    return None
 
 
 class LFGPostModal(discord.ui.Modal, title="Post an LFG"):
@@ -222,59 +251,17 @@ class LFGFusedModal(discord.ui.Modal, title="Post an LFG"):
         enforce_gate: bool,
         enforce_cooldown: bool,
         silent_ping: bool,
-        defaults: Optional[Dict[str, object]] = None,
-        updating: bool = False,
     ):
-        # defaults is the stored last_lfg_post record when updating: every
-        # field arrives prefilled with the post's current values.
-        if updating:
-            title = "Update your Modded LFG" if is_modded else "Update your LFG"
-        else:
-            title = "Post a Modded LFG" if is_modded else "Post an LFG"
-        super().__init__(title=title)
+        super().__init__(title="Post a Modded LFG" if is_modded else "Post an LFG")
         self.cog = cog
         self.destination_id = destination_id
         self.is_modded = is_modded
         self.enforce_gate = enforce_gate
         self.enforce_cooldown = enforce_cooldown
         self.silent_ping = silent_ping
-        self.updating = updating
         # Set when this submission consumed the cooldown; cleared the moment
         # the post lands so a late failure can never refund a live post.
         self.committed_stamp: Optional[float] = None
-
-        stored = defaults or {}
-        stored_settings = stored.get("settings") or {}
-        # The message this update form was opened for; handle_update_submit
-        # refuses a stale form whose target changed underneath it.
-        self.updating_message_id = stored.get("message_id") if updating else None
-        # Defensive prefill validation: if the bounds constants are ever
-        # tightened, stale records must not prefill out-of-bounds values (an
-        # over-max prefill can even make Discord reject the modal payload).
-        lobby_default = stored.get("lobby")
-        if not (
-            isinstance(lobby_default, str)
-            and lobby_default.isdecimal()
-            and LOBBY_ID_MIN_LENGTH <= len(lobby_default) <= LOBBY_ID_MAX_LENGTH
-        ):
-            lobby_default = None
-        players_default = stored_settings.get("Max Players")
-        if not (
-            isinstance(players_default, str)
-            and players_default.isdecimal()
-            and 2 <= int(players_default) <= 10
-        ):
-            players_default = None
-        first_to_default = stored_settings.get("First To")
-        if not (
-            isinstance(first_to_default, str)
-            and first_to_default.isdecimal()
-            and 1 <= int(first_to_default) <= 50
-        ):
-            first_to_default = None
-        notes_default = stored.get("notes")
-        if not (isinstance(notes_default, str) and len(notes_default) <= NOTES_MAX_LENGTH):
-            notes_default = None
 
         self.lobby_id_field = discord.ui.Label(
             text="Lobby ID",
@@ -284,7 +271,6 @@ class LFGFusedModal(discord.ui.Modal, title="Post an LFG"):
                 min_length=LOBBY_ID_MIN_LENGTH,
                 max_length=LOBBY_ID_MAX_LENGTH,
                 required=True,
-                default=lobby_default,
             ),
         )
         if is_modded:
@@ -292,28 +278,19 @@ class LFGFusedModal(discord.ui.Modal, title="Post an LFG"):
             # need 18 options (over the radio group's 10-option cap), so Max
             # Players becomes a numerical input and Gamemode its own radio
             # group. The extra slot comes from dropping First To, which stays
-            # available on the detailed button tier.
+            # available on the detailed button tier and via /lfgupdate.
             self.core_field = None
             self.max_players_field = discord.ui.Label(
                 text="Max Players",
                 description="A number from 2 to 10",
-                component=discord.ui.TextInput(
-                    placeholder="10",
-                    max_length=2,
-                    required=True,
-                    default=players_default,
-                ),
+                component=discord.ui.TextInput(placeholder="10", max_length=2, required=True),
             )
             self.gamemode_field = discord.ui.Label(
                 text="Gamemode",
                 component=discord.ui.RadioGroup(
                     options=[
                         # Modded Gamemode: alternative modes are a popular mod category.
-                        discord.RadioGroupOption(
-                            label=mode,
-                            value=mode,
-                            default=(stored_settings.get("Gamemode") == mode),
-                        )
+                        discord.RadioGroupOption(label=mode, value=mode)
                         for mode in ("FFA", "Teams", "Modded Gamemode")
                     ],
                     required=True,
@@ -322,19 +299,12 @@ class LFGFusedModal(discord.ui.Modal, title="Post an LFG"):
         else:
             self.max_players_field = None
             self.gamemode_field = None
-            stored_combo = None
-            if stored_settings.get("Max Players") and stored_settings.get("Gamemode"):
-                stored_combo = f'{stored_settings["Max Players"]}|{stored_settings["Gamemode"]}'
             self.core_field = discord.ui.Label(
                 text="Lobby Setup",
                 description="Max players and gamemode",
                 component=discord.ui.RadioGroup(
                     options=[
-                        discord.RadioGroupOption(
-                            label=f"{n} players, {mode}",
-                            value=f"{n}|{mode}",
-                            default=(stored_combo == f"{n}|{mode}"),
-                        )
+                        discord.RadioGroupOption(label=f"{n} players, {mode}", value=f"{n}|{mode}")
                         for n in (2, 3, 4)
                         for mode in ("FFA", "Teams")
                     ],
@@ -350,11 +320,7 @@ class LFGFusedModal(discord.ui.Modal, title="Post an LFG"):
                 max_values=len(self.PACKED_OPTIONS),
                 required=False,
                 options=[
-                    discord.SelectOption(
-                        label=f"{group}: {value}",
-                        value=f"{group}|{value}",
-                        default=(stored_settings.get(group) == value),
-                    )
+                    discord.SelectOption(label=f"{group}: {value}", value=f"{group}|{value}")
                     for group, value in self.PACKED_OPTIONS
                 ],
             ),
@@ -365,12 +331,7 @@ class LFGFusedModal(discord.ui.Modal, title="Post an LFG"):
             self.first_to_field = discord.ui.Label(
                 text="First To",
                 description="Optional. First to how many wins? 1 to 50.",
-                component=discord.ui.TextInput(
-                    placeholder="10",
-                    max_length=2,
-                    required=False,
-                    default=first_to_default,
-                ),
+                component=discord.ui.TextInput(placeholder="10", max_length=2, required=False),
             )
         if is_modded:
             notes_description = f"Optional, but please list the mods your lobby is running! Max {NOTES_MAX_LENGTH} characters."
@@ -386,7 +347,6 @@ class LFGFusedModal(discord.ui.Modal, title="Post an LFG"):
                 max_length=NOTES_MAX_LENGTH,
                 required=False,
                 placeholder=notes_placeholder,
-                default=notes_default,
             ),
         )
         if is_modded:
@@ -409,7 +369,9 @@ class LFGFusedModal(discord.ui.Modal, title="Post an LFG"):
             self.add_item(field)
 
     def read_core(self) -> Tuple[Optional[str], Optional[str], Optional[str]]:
-        """(max_players, gamemode, error_message) for either variant."""
+        """(max_players, gamemode, error_message) for either variant.
+        Duplicated between LFGFusedModal and LFGUpdateEssentialsModal
+        (same field attributes); keep the two copies in sync."""
         if self.is_modded:
             raw = str(self.max_players_field.component.value or "").strip()
             if not raw.isdecimal() or not 2 <= int(raw) <= 10:
@@ -432,10 +394,7 @@ class LFGFusedModal(discord.ui.Modal, title="Post an LFG"):
         return str(self.first_to_field.component.value or "").strip()
 
     async def on_submit(self, interaction: discord.Interaction):
-        if self.updating:
-            await self.cog.handle_update_submit(interaction, self)
-        else:
-            await self.cog.handle_fused_submit(interaction, self)
+        await self.cog.handle_fused_submit(interaction, self)
 
     async def on_error(self, interaction: discord.Interaction, error: Exception):
         log.exception("LFGFusedModal submission failed", exc_info=error)
@@ -594,16 +553,352 @@ class LFGDraftPanelView(discord.ui.View):
             pass
 
 
+class LFGUpdateEssentialsModal(discord.ui.Modal, title="Edit Essentials"):
+    """Partial /lfgupdate form: Lobby ID, players and gamemode, and Notes,
+    prefilled from the stored post. Optional settings have their own modal."""
+
+    def __init__(self, cog, panel):
+        super().__init__(title="Edit Essentials")
+        self.cog = cog
+        self.panel = panel
+        record = panel.record or {}
+        settings = record.get("settings") or {}
+        is_modded = bool(record.get("is_modded"))
+        self.is_modded = is_modded
+
+        self.lobby_id_field = discord.ui.Label(
+            text="Lobby ID",
+            description=f"Numbers only, {LOBBY_ID_MIN_LENGTH} to {LOBBY_ID_MAX_LENGTH} digits",
+            component=discord.ui.TextInput(
+                placeholder="12345678",
+                min_length=LOBBY_ID_MIN_LENGTH,
+                max_length=LOBBY_ID_MAX_LENGTH,
+                required=True,
+                default=_lobby_prefill(record.get("lobby")),
+            ),
+        )
+        if is_modded:
+            self.core_field = None
+            self.max_players_field = discord.ui.Label(
+                text="Max Players",
+                description="A number from 2 to 10",
+                component=discord.ui.TextInput(
+                    placeholder="10",
+                    max_length=2,
+                    required=True,
+                    default=_players_prefill(settings.get("Max Players")),
+                ),
+            )
+            self.gamemode_field = discord.ui.Label(
+                text="Gamemode",
+                component=discord.ui.RadioGroup(
+                    options=[
+                        discord.RadioGroupOption(
+                            label=mode,
+                            value=mode,
+                            default=(settings.get("Gamemode") == mode),
+                        )
+                        for mode in ("FFA", "Teams", "Modded Gamemode")
+                    ],
+                    required=True,
+                ),
+            )
+        else:
+            self.max_players_field = None
+            self.gamemode_field = None
+            stored_combo = None
+            if settings.get("Max Players") and settings.get("Gamemode"):
+                stored_combo = f'{settings["Max Players"]}|{settings["Gamemode"]}'
+            self.core_field = discord.ui.Label(
+                text="Lobby Setup",
+                description="Max players and gamemode",
+                component=discord.ui.RadioGroup(
+                    options=[
+                        discord.RadioGroupOption(
+                            label=f"{n} players, {mode}",
+                            value=f"{n}|{mode}",
+                            default=(stored_combo == f"{n}|{mode}"),
+                        )
+                        for n in (2, 3, 4)
+                        for mode in ("FFA", "Teams")
+                    ],
+                    required=True,
+                ),
+            )
+        if is_modded:
+            notes_description = f"Optional, but please list the mods your lobby is running! Max {NOTES_MAX_LENGTH} characters."
+        else:
+            notes_description = f"Optional. Casual? Competitive? Anything else! Max {NOTES_MAX_LENGTH} characters."
+        self.notes_field = discord.ui.Label(
+            text="Notes",
+            description=notes_description,
+            component=discord.ui.TextInput(
+                style=discord.TextStyle.paragraph,
+                max_length=NOTES_MAX_LENGTH,
+                required=False,
+                default=_notes_prefill(record.get("notes")),
+            ),
+        )
+        fields = [self.lobby_id_field]
+        if is_modded:
+            fields.extend([self.max_players_field, self.gamemode_field])
+        else:
+            fields.append(self.core_field)
+        fields.append(self.notes_field)
+        for field in fields:
+            self.add_item(field)
+
+    def read_core(self) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+        """(max_players, gamemode, error_message) for either variant.
+        Duplicated between LFGFusedModal and LFGUpdateEssentialsModal
+        (same field attributes); keep the two copies in sync."""
+        if self.is_modded:
+            raw = str(self.max_players_field.component.value or "").strip()
+            if not raw.isdecimal() or not 2 <= int(raw) <= 10:
+                return None, None, "Max Players must be a number from 2 to 10."
+            gamemode = self.gamemode_field.component.value
+            if not gamemode:
+                return None, None, "A required selection is missing. Please try again."
+            return str(int(raw)), gamemode, None
+        value = self.core_field.component.value
+        if not value:
+            return None, None, "A required selection is missing. Please try again."
+        max_players, _, gamemode = value.partition("|")
+        return max_players, gamemode, None
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await self.cog.handle_update_essentials(interaction, self)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        log.exception("LFGUpdateEssentialsModal submission failed", exc_info=error)
+        try:
+            msg = "Something went wrong. Please try again."
+            if interaction.response.is_done():
+                await interaction.followup.send(msg, ephemeral=True)
+            else:
+                await interaction.response.send_message(msg, ephemeral=True)
+        except discord.HTTPException:
+            pass
+
+
+class LFGUpdateOptionalModal(discord.ui.Modal, title="Edit Optional Settings"):
+    """Partial /lfgupdate form: the packed optional settings and First To,
+    prefilled. Available on both variants, so modded posts can set First To
+    here even though their posting form has no room for the field."""
+
+    def __init__(self, cog, panel):
+        super().__init__(title="Edit Optional Settings")
+        self.cog = cog
+        self.panel = panel
+        settings = (panel.record or {}).get("settings") or {}
+
+        self.settings_field = discord.ui.Label(
+            text="Optional Settings",
+            description="Pick at most one option per category",
+            component=discord.ui.Select(
+                placeholder="Randomizer, lobby type, friendly fire and more",
+                min_values=0,
+                max_values=len(LFGFusedModal.PACKED_OPTIONS),
+                required=False,
+                options=[
+                    discord.SelectOption(
+                        label=f"{group}: {value}",
+                        value=f"{group}|{value}",
+                        default=(settings.get(group) == value),
+                    )
+                    for group, value in LFGFusedModal.PACKED_OPTIONS
+                ],
+            ),
+        )
+        self.first_to_field = discord.ui.Label(
+            text="First To",
+            description="Optional. First to how many wins? 1 to 50.",
+            component=discord.ui.TextInput(
+                placeholder="10",
+                max_length=2,
+                required=False,
+                default=_first_to_prefill(settings.get("First To")),
+            ),
+        )
+        self.add_item(self.settings_field)
+        self.add_item(self.first_to_field)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await self.cog.handle_update_optional(interaction, self)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        log.exception("LFGUpdateOptionalModal submission failed", exc_info=error)
+        try:
+            msg = "Something went wrong. Please try again."
+            if interaction.response.is_done():
+                await interaction.followup.send(msg, ephemeral=True)
+            else:
+                await interaction.response.send_message(msg, ephemeral=True)
+        except discord.HTTPException:
+            pass
+
+
+class LFGUpdatePanelView(discord.ui.View):
+    """The ephemeral /lfgupdate management panel: edit the essentials, edit
+    the optional settings, or delete the post. The record snapshot feeds the
+    modal prefills; every action re-reads Config and refuses a stale panel
+    whose target post changed. busy serializes in-flight actions."""
+
+    def __init__(self, cog, record: Dict[str, object], guild_id: int):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.record = record
+        self.guild_id = guild_id
+        self.message_id = record.get("message_id")
+        self.busy = False
+        self.closed = False
+        self.message = None
+        # The currently attached delete-confirm view, if any: orphaned
+        # confirms (double-clicked Delete) must never fire their timeout.
+        self.active_confirm = None
+
+    def panel_content(self) -> str:
+        lobby = (self.record or {}).get("lobby", "?")
+        url = (
+            f"https://discord.com/channels/{self.guild_id}/"
+            f"{(self.record or {}).get('channel_id')}/{self.message_id}"
+        )
+        return (
+            f"Managing your latest LFG post (Lobby ID `{lobby}`)."
+            f" [Jump to the post]({url})\n"
+            "Edit the essentials, adjust the optional settings, or delete it."
+        )
+
+    async def on_timeout(self):
+        if self.closed:
+            return
+        for item in self.children:
+            item.disabled = True
+        if self.message is not None:
+            try:
+                await self.message.edit(
+                    content="This panel expired. Run /lfgupdate again.", view=self
+                )
+            except discord.HTTPException:
+                pass
+
+    async def _fresh_record(self, interaction: discord.Interaction):
+        """Re-read the record; None (after an ephemeral refusal) if stale."""
+        record = await self.cog.config.member(interaction.user).last_lfg_post()
+        if not record or record.get("message_id") != self.message_id:
+            await interaction.response.send_message(
+                "Your last post changed since this panel opened. Run /lfgupdate again.",
+                ephemeral=True,
+            )
+            return None
+        return record
+
+    @discord.ui.button(label="Edit Essentials", style=discord.ButtonStyle.success)
+    async def edit_essentials(self, interaction: discord.Interaction, button: discord.ui.Button):
+        record = await self._fresh_record(interaction)
+        if record is None:
+            return
+        self.record = record
+        await interaction.response.send_modal(LFGUpdateEssentialsModal(self.cog, self))
+
+    @discord.ui.button(label="Optional Settings", style=discord.ButtonStyle.secondary)
+    async def edit_optional(self, interaction: discord.Interaction, button: discord.ui.Button):
+        record = await self._fresh_record(interaction)
+        if record is None:
+            return
+        self.record = record
+        await interaction.response.send_modal(LFGUpdateOptionalModal(self.cog, self))
+
+    @discord.ui.button(label="Delete Post", style=discord.ButtonStyle.danger)
+    async def delete_post(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.busy:
+            return await interaction.response.send_message(
+                "Another update for this post is in flight. Please try again.", ephemeral=True
+            )
+        record = await self._fresh_record(interaction)
+        if record is None:
+            return
+        self.record = record
+        if self.active_confirm is not None:
+            self.active_confirm.stop()
+        confirm = LFGUpdateDeleteConfirmView(self.cog, self)
+        self.active_confirm = confirm
+        await interaction.response.edit_message(
+            content="Delete your LFG post? This cannot be undone.",
+            view=confirm,
+        )
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item):
+        log.exception("LFGUpdatePanelView interaction failed", exc_info=error)
+        try:
+            msg = "Something went wrong. Please try again."
+            if interaction.response.is_done():
+                await interaction.followup.send(msg, ephemeral=True)
+            else:
+                await interaction.response.send_message(msg, ephemeral=True)
+        except discord.HTTPException:
+            pass
+
+
+class LFGUpdateDeleteConfirmView(discord.ui.View):
+    """Confirmation step for deleting the tracked LFG post."""
+
+    def __init__(self, cog, panel: LFGUpdatePanelView):
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.panel = panel
+
+    async def on_timeout(self):
+        # Only the currently attached confirm may act; orphaned instances
+        # (replaced by a re-clicked Delete) must not kill a live panel.
+        if self.panel.closed or self.panel.active_confirm is not self:
+            return
+        self.panel.active_confirm = None
+        if self.panel.message is not None:
+            try:
+                await self.panel.message.edit(
+                    content="Deletion timed out. Run /lfgupdate again.", view=None
+                )
+            except discord.HTTPException:
+                pass
+        self.panel.stop()
+
+    @discord.ui.button(label="Delete", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.handle_update_delete(interaction, self.panel, self)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.stop()
+        if self.panel.active_confirm is self:
+            self.panel.active_confirm = None
+        await interaction.response.edit_message(
+            content=self.panel.panel_content(), view=self.panel
+        )
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item):
+        log.exception("LFGUpdateDeleteConfirmView interaction failed", exc_info=error)
+        try:
+            msg = "Something went wrong. Please try again."
+            if interaction.response.is_done():
+                await interaction.followup.send(msg, ephemeral=True)
+            else:
+                await interaction.response.send_message(msg, ephemeral=True)
+        except discord.HTTPException:
+            pass
+
+
 class LFGStickyView(discord.ui.View):
     """Persistent quick-post buttons on the new-system sticky message.
 
     timeout=None + stable custom_ids, registered once per cog load via
     bot.add_view, so one registration serves every sticky in every channel
     and the buttons keep working across restarts with zero per-message
-    bookkeeping. The buttons open the detailed tier: the guided two-modal
-    bridge (essentials modal, then Post Now or an Optional Settings page),
-    with the same region gate, shared cooldown, and destination as the
-    streamlined slash commands.
+    bookkeeping. The LFG and Modded LFG buttons open the detailed tier: the
+    guided two-modal bridge (essentials modal, then Post Now or an Optional
+    Settings page), with the same region gate, shared cooldown, and
+    destination as the streamlined slash commands. The Update Last LFG button
+    opens the same ephemeral management panel as /lfgupdate.
     """
 
     def __init__(self, cog):
@@ -625,6 +920,14 @@ class LFGStickyView(discord.ui.View):
     )
     async def sticky_lfgmod(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.handle_sticky_button(interaction, is_modded=True)
+
+    @discord.ui.button(
+        label="Update Last LFG",
+        style=discord.ButtonStyle.secondary,
+        custom_id="straftatlfg:v1:sticky_update",
+    )
+    async def sticky_update(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.open_update_panel(interaction)
 
 
 class LFG(commands.Cog):
@@ -1334,7 +1637,8 @@ class LFG(commands.Cog):
         if self._cooldown_cache.get(key) == stamp:
             del self._cooldown_cache[key]
 
-    # -- The streamlined single-modal flow (/lfg, /lfgmod, /lfgupdate) --------
+    # -- The streamlined single-modal flow (/lfg, /lfgmod) and the ------------
+    # -- /lfgupdate management panel ------------------------------------------
 
     def _read_fused_form(self, modal: LFGFusedModal):
         """Parse and validate a fused-modal submission for either variant.
@@ -1501,118 +1805,242 @@ class LFG(commands.Cog):
         except Exception:
             log.exception("Failed to record the LFG post for /lfgupdate")
 
-    async def handle_update_submit(self, interaction: discord.Interaction, modal: LFGFusedModal):
-        """Edit the member's last LFG post in place. Message edits never
-        re-ping the role, so only the short update cooldown applies and there
-        is no region gate. Fields the form can express are authoritative;
-        fields it cannot (First To on the modded variant) carry over from the
-        stored post."""
-        member = interaction.user
+    async def handle_update_essentials(self, interaction: discord.Interaction, modal: LFGUpdateEssentialsModal):
+        """Partial update from the Edit Essentials modal: Lobby ID, players
+        and gamemode, and Notes. Optional settings are preserved as stored."""
+        lobby = str(modal.lobby_id_field.component.value or "").strip()
+        if not lobby.isdecimal() or not LOBBY_ID_MIN_LENGTH <= len(lobby) <= LOBBY_ID_MAX_LENGTH:
+            return await interaction.response.send_message(
+                f"The Lobby ID must be {LOBBY_ID_MIN_LENGTH} to {LOBBY_ID_MAX_LENGTH} numbers.",
+                ephemeral=True,
+            )
+        max_players, gamemode, core_error = modal.read_core()
+        if core_error:
+            return await interaction.response.send_message(core_error, ephemeral=True)
+        notes = self.sanitize_notes(
+            modal.notes_field.component.value or None, allow_links=modal.is_modded
+        )
+        await self._finish_lfg_update(
+            interaction,
+            modal.panel,
+            essentials={
+                "lobby": lobby,
+                "notes": notes,
+                "max_players": max_players,
+                "gamemode": gamemode,
+            },
+        )
 
+    async def handle_update_optional(self, interaction: discord.Interaction, modal: LFGUpdateOptionalModal):
+        """Partial update from the Edit Optional Settings modal. The form is
+        authoritative for every optional category and First To: deselecting a
+        prefilled option (or clearing First To) removes that setting."""
+        first_to_raw = str(modal.first_to_field.component.value or "").strip()
+        if first_to_raw and (not first_to_raw.isdecimal() or not 1 <= int(first_to_raw) <= 50):
+            return await interaction.response.send_message(
+                "First To must be a number from 1 to 50.", ephemeral=True
+            )
+        picked: Dict[str, str] = {}
+        conflicts = []
+        for raw in modal.settings_field.component.values:
+            group, _, value = raw.partition("|")
+            if group in picked and group not in conflicts:
+                conflicts.append(group)
+            picked[group] = value
+        if conflicts:
+            return await interaction.response.send_message(
+                "Pick at most one option per category. You picked more than one"
+                f" for: {', '.join(conflicts)}. Please try again.",
+                ephemeral=True,
+            )
+        optional = self._blank_optional_settings()
+        optional["First To"] = str(int(first_to_raw)) if first_to_raw else None
+        for group, value in picked.items():
+            optional[group] = value
+        await self._finish_lfg_update(interaction, modal.panel, optional=optional)
+
+    async def _finish_lfg_update(
+        self,
+        interaction: discord.Interaction,
+        panel: LFGUpdatePanelView,
+        *,
+        essentials: Optional[Dict[str, Optional[str]]] = None,
+        optional: Optional[Dict[str, Optional[str]]] = None,
+    ):
+        """Shared tail of every /lfgupdate edit: blocklist, busy and stale
+        guards, the update cooldown (compare-and-clear refund on failure),
+        fetch and edit the post, persist the record, refresh the panel. The
+        deltas are merged onto the freshly re-read record, never the panel
+        snapshot, so a concurrent edit from another session is not reverted."""
+        member = interaction.user
         if self._is_lfg_blocked(member):
             return await interaction.response.send_message(self.LFG_BLOCKED_MESSAGE, ephemeral=True)
-
-        form, form_error = self._read_fused_form(modal)
-        if form_error:
-            return await interaction.response.send_message(form_error, ephemeral=True)
-
-        record = await self.config.member(member).last_lfg_post()
-        if not record or not record.get("message_id"):
+        # Synchronous check-and-set: one in-flight action per panel.
+        if panel.busy:
             return await interaction.response.send_message(
-                "You have no LFG post to update. Post one with /lfg or /lfgmod first!",
-                ephemeral=True,
+                "Another update for this post is in flight. Please try again.", ephemeral=True
             )
-        if modal.updating_message_id != record.get("message_id"):
-            # The member posted a new LFG while this form sat open; editing
-            # the new post with the old form's values would silently revert
-            # it (and could mismatch the variant).
-            return await interaction.response.send_message(
-                "Your last post changed since you opened this form. Run"
-                " /lfgupdate again.",
-                ephemeral=True,
+        panel.busy = True
+        try:
+            current = await self.config.member(member).last_lfg_post()
+            if not current or current.get("message_id") != panel.message_id:
+                return await interaction.response.send_message(
+                    "Your last post changed since this panel opened. Run /lfgupdate again.",
+                    ephemeral=True,
+                )
+            # Rebase the deltas onto the fresh read.
+            record: Dict[str, object] = dict(current)
+            settings = dict(record.get("settings") or {})
+            if essentials is not None:
+                settings["Max Players"] = essentials["max_players"]
+                settings["Gamemode"] = essentials["gamemode"]
+                record["lobby"] = essentials["lobby"]
+                record["notes"] = essentials["notes"]
+            if optional is not None:
+                rebuilt: Dict[str, str] = {}
+                for name in ("Max Players", "Gamemode", "Modded Lobby"):
+                    if settings.get(name) is not None:
+                        rebuilt[name] = settings[name]
+                for name, value in optional.items():
+                    if value is not None:
+                        rebuilt[name] = value
+                settings = rebuilt
+            record["settings"] = settings
+            # Update cooldown: synchronous check-and-stamp after the awaited
+            # reads, refunded (compare-and-clear) if the edit never lands.
+            key = (interaction.guild.id, member.id)
+            now = time.time()
+            remaining = self.LFG_UPDATE_COOLDOWN_SECONDS - (now - self._update_last.get(key, 0.0))
+            if remaining > 0:
+                return await interaction.response.send_message(
+                    f"You can update again in {max(1, round(remaining))}s.", ephemeral=True
+                )
+            self._update_last[key] = now
+
+            await interaction.response.defer(ephemeral=True, thinking=True)
+
+            channel = interaction.guild.get_channel(record.get("channel_id"))
+            message = None
+            if channel is not None:
+                try:
+                    message = await channel.fetch_message(panel.message_id)
+                except discord.HTTPException:
+                    message = None
+            if message is None:
+                if self._update_last.get(key) == now:
+                    del self._update_last[key]
+                panel.closed = True
+                panel.stop()
+                try:
+                    await self.config.member(member).last_lfg_post.set({})
+                except Exception:
+                    log.exception("Failed to clear a stale LFG record")
+                if panel.message is not None:
+                    try:
+                        await panel.message.edit(
+                            content="Your last LFG post no longer exists. Post a new one!",
+                            view=None,
+                        )
+                    except discord.HTTPException:
+                        pass
+                return await interaction.followup.send(
+                    "Your last LFG post no longer exists. Post a new one with /lfg or /lfgmod!",
+                    ephemeral=True,
+                )
+
+            embed = self.build_lfg_embed(
+                member,
+                str(record.get("lobby") or ""),
+                record.get("notes"),
+                region=self.get_member_region(member),
+                settings=record.get("settings") or {},
+                is_modded=bool(record.get("is_modded")),
+                updated=True,
             )
-
-        # Update cooldown: synchronous check-and-stamp, refunded if the edit
-        # never lands.
-        key = (interaction.guild.id, member.id)
-        now = time.time()
-        remaining = self.LFG_UPDATE_COOLDOWN_SECONDS - (now - self._update_last.get(key, 0.0))
-        if remaining > 0:
-            return await interaction.response.send_message(
-                f"You can update again in {max(1, round(remaining))}s.", ephemeral=True
-            )
-        self._update_last[key] = now
-
-        await interaction.response.defer(ephemeral=True, thinking=True)
-
-        is_modded = bool(record.get("is_modded"))
-        optional = self._blank_optional_settings()
-        if form["has_first_to_field"]:
-            optional["First To"] = form["first_to"]
-        else:
-            optional["First To"] = (record.get("settings") or {}).get("First To")
-        for group, value in form["picked"].items():
-            optional[group] = value
-        settings: Dict[str, str] = {
-            "Max Players": form["max_players"],
-            "Gamemode": form["gamemode"],
-            "Modded Lobby": "Yes" if is_modded else "No",
-        }
-        for name, value in optional.items():
-            if value is not None:
-                settings[name] = value
-
-        channel = interaction.guild.get_channel(record.get("channel_id"))
-        message = None
-        if channel is not None:
             try:
-                message = await channel.fetch_message(record["message_id"])
+                await message.edit(embed=embed)
             except discord.HTTPException:
-                message = None
-        if message is None:
-            # Compare-and-clear: never erase a newer stamp from another session.
-            if self._update_last.get(key) == now:
-                del self._update_last[key]
+                log.exception("Failed to edit LFG post %s", panel.message_id)
+                if self._update_last.get(key) == now:
+                    del self._update_last[key]
+                return await interaction.followup.send(
+                    "I couldn't update your LFG post. Please try again.", ephemeral=True
+                )
+
+            panel.record = record
+            try:
+                await self.config.member(member).last_lfg_post.set(record)
+            except Exception:
+                log.exception("Failed to persist the updated LFG record")
+            if (
+                panel.message is not None
+                and not panel.is_finished()
+                and panel.active_confirm is None
+            ):
+                # Never re-attach a stopped view (its buttons would render
+                # live but answer with "interaction failed"), and never yank
+                # a delete confirmation out from under the user.
+                try:
+                    await panel.message.edit(content=panel.panel_content(), view=panel)
+                except discord.HTTPException:
+                    pass
+            try:
+                await interaction.followup.send(
+                    f"Updated! [Jump to your LFG]({message.jump_url})", ephemeral=True
+                )
+            except discord.HTTPException:
+                log.exception("Failed to send the LFG update confirmation")
+        finally:
+            panel.busy = False
+
+    async def handle_update_delete(
+        self,
+        interaction: discord.Interaction,
+        panel: LFGUpdatePanelView,
+        confirm_view: LFGUpdateDeleteConfirmView,
+    ):
+        """Delete the tracked post after confirmation and clear the record.
+        No cooldown applies: the record clears, so nothing is left to spam.
+        No blocklist check either, deliberately: deleting removes content,
+        which a blocked member should still be able to do."""
+        member = interaction.user
+        if panel.busy:
+            return await interaction.response.send_message(
+                "Another update for this post is in flight. Please try again.", ephemeral=True
+            )
+        panel.busy = True
+        try:
+            current = await self.config.member(member).last_lfg_post()
+            if not current or current.get("message_id") != panel.message_id:
+                return await interaction.response.send_message(
+                    "Your last post changed since this panel opened. Run /lfgupdate again.",
+                    ephemeral=True,
+                )
+            await interaction.response.defer()
+            channel = interaction.guild.get_channel((panel.record or {}).get("channel_id"))
+            if channel is not None:
+                try:
+                    message = await channel.fetch_message(panel.message_id)
+                    await message.delete()
+                except discord.HTTPException:
+                    # Already gone or undeletable; clear our state regardless.
+                    pass
             try:
                 await self.config.member(member).last_lfg_post.set({})
             except Exception:
-                log.exception("Failed to clear a stale LFG record")
-            return await interaction.followup.send(
-                "Your last LFG post no longer exists. Post a new one with /lfg or /lfgmod!",
-                ephemeral=True,
-            )
-
-        embed = self.build_lfg_embed(
-            member,
-            form["lobby"],
-            form["notes"],
-            region=self.get_member_region(member),
-            settings=settings,
-            is_modded=is_modded,
-            updated=True,
-        )
-        try:
-            await message.edit(embed=embed)
-        except discord.HTTPException:
-            log.exception("Failed to edit LFG post %s", record.get("message_id"))
-            if self._update_last.get(key) == now:
-                del self._update_last[key]
-            return await interaction.followup.send(
-                "I couldn't update your LFG post. Please try again.", ephemeral=True
-            )
-
-        record.update({"lobby": form["lobby"], "notes": form["notes"], "settings": settings})
-        try:
-            await self.config.member(member).last_lfg_post.set(record)
-        except Exception:
-            log.exception("Failed to persist the updated LFG record")
-        try:
-            await interaction.followup.send(
-                f"Updated! [Jump to your LFG]({message.jump_url}) | Lobby ID: `{form['lobby']}`",
-                ephemeral=True,
-            )
-        except discord.HTTPException:
-            log.exception("Failed to send the LFG update confirmation")
+                log.exception("Failed to clear the LFG record after deletion")
+            panel.closed = True
+            panel.active_confirm = None
+            confirm_view.stop()
+            panel.stop()
+            try:
+                await interaction.edit_original_response(
+                    content="Your LFG post was deleted.", view=None
+                )
+            except discord.HTTPException:
+                pass
+        finally:
+            panel.busy = False
 
     # -- The guided two-modal bridge (sticky buttons + test commands) ---------
 
@@ -1926,8 +2354,9 @@ class LFG(commands.Cog):
             "**/lfgmod**: post a modded lobby. Please list your mods in the "
             "Notes field! To set First To on a modded lobby, use the Modded "
             "LFG button below.\n"
-            "**/lfgupdate**: update your last posted LFG in place, prefilled "
-            "with its current values. No new ping is sent.\n\n"
+            "**/lfgupdate**: manage your last posted LFG. Edit its details or "
+            "delete it. No new ping is sent. The Update Last LFG button below "
+            "does the same.\n\n"
             "**Detailed (buttons below):** a guided setup. Fill in the "
             "essentials first, then choose Post Now or add optional settings "
             "(First To, Lobby Type, Friendly Fire and more) on a second page. "
@@ -2031,10 +2460,11 @@ class LFG(commands.Cog):
         next message. Use this command to turn it off.
 
         The sticky explains the streamlined slash commands (/lfg, /lfgmod,
-        /lfgpings) and carries LFG and Modded LFG quick-post buttons that open
-        the detailed guided flow: an essentials modal, then Post Now or an
-        Optional Settings page. Administrator only. Cannot be enabled in a
-        channel where the legacy sticky is active.
+        /lfgpings, /lfgupdate) and carries three buttons: LFG and Modded LFG
+        open the detailed guided flow (an essentials modal, then Post Now or
+        an Optional Settings page), and Update Last LFG opens the /lfgupdate
+        management panel. Administrator only. Cannot be enabled in a channel
+        where the legacy sticky is active.
         """
         if state is not None and state.lower() not in ("on", "off"):
             return await ctx.send(
@@ -2264,13 +2694,10 @@ class LFG(commands.Cog):
             optional_settings=self._blank_optional_settings(),
         )
 
-    @app_commands.command(name="lfgupdate", description="Update your last posted LFG")
-    @app_commands.guild_only()
-    async def slash_lfgupdate(self, interaction: discord.Interaction):
-        """Opens your last post's form, prefilled with its current values, and
-        edits the post in place on submit. Works for vanilla and modded posts
-        alike (the stored record picks the matching variant). No new role
-        ping is sent, so only the short update cooldown applies."""
+    async def open_update_panel(self, interaction: discord.Interaction):
+        """Open the ephemeral /lfgupdate management panel. Shared by the
+        slash command and the sticky's Update Last LFG button (both slash
+        and component interactions accept the same ephemeral response)."""
         if self._is_lfg_blocked(interaction.user):
             return await interaction.response.send_message(self.LFG_BLOCKED_MESSAGE, ephemeral=True)
         record = await self.config.member(interaction.user).last_lfg_post()
@@ -2279,24 +2706,24 @@ class LFG(commands.Cog):
                 "You have no LFG post to update. Post one with /lfg or /lfgmod first!",
                 ephemeral=True,
             )
-        key = (interaction.guild.id, interaction.user.id)
-        remaining = self.LFG_UPDATE_COOLDOWN_SECONDS - (time.time() - self._update_last.get(key, 0.0))
-        if remaining > 0:
-            return await interaction.response.send_message(
-                f"You can update again in {max(1, round(remaining))}s.", ephemeral=True
-            )
-        await interaction.response.send_modal(
-            LFGFusedModal(
-                self,
-                destination_id=record.get("channel_id", self.NEW_LFG_CHANNEL_ID),
-                is_modded=bool(record.get("is_modded")),
-                enforce_gate=False,
-                enforce_cooldown=False,
-                silent_ping=False,
-                defaults=record,
-                updating=True,
-            )
+        panel = LFGUpdatePanelView(self, record, interaction.guild.id)
+        await interaction.response.send_message(
+            panel.panel_content(), view=panel, ephemeral=True
         )
+        try:
+            panel.message = await interaction.original_response()
+        except discord.HTTPException:
+            panel.message = None
+
+    @app_commands.command(name="lfgupdate", description="Manage your last posted LFG")
+    @app_commands.guild_only()
+    async def slash_lfgupdate(self, interaction: discord.Interaction):
+        """Opens an ephemeral management panel for your last posted LFG:
+        edit the essentials (Lobby ID, players, gamemode, notes), adjust the
+        optional settings (including First To, even on modded posts), or
+        delete the post. Edits never re-ping; each edit is subject to the
+        short update cooldown."""
+        await self.open_update_panel(interaction)
 
     @app_commands.command(name="lfgpings", description="Toggle whether you get pinged for LFG posts")
     @app_commands.guild_only()
@@ -2329,8 +2756,8 @@ class LFG(commands.Cog):
 
     # No cog_app_command_error handler: Red's RedTree.on_error already logs
     # unexpected app-command exceptions and replies ephemerally; a cog handler
-    # here would duplicate both. Modal errors are handled by each modal's own
-    # on_error (LFGPostModal, LFGFusedModal, LFGOptionalSettingsModal).
+    # here would duplicate both. Modal errors are handled by every modal's
+    # own on_error handler.
 
     async def red_delete_data_for_user(self, *, requester, user_id: int):
         """Purge the stored cooldown timestamp and last-post record (the
