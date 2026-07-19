@@ -383,9 +383,9 @@ class LFGFusedModal(discord.ui.Modal, title="Post an LFG"):
             self.add_item(field)
 
     def read_core(self) -> Tuple[Optional[str], Optional[str], Optional[str]]:
-        """(max_players, gamemode, error_message) for either variant.
-        Duplicated between LFGFusedModal and LFGUpdateEssentialsModal
-        (same field attributes); keep the two copies in sync."""
+        """(max_players, gamemode, error_message) for either variant of the
+        fused posting layout (the update Essentials modal has its own reader
+        for its posting-form-style split fields)."""
         if self.is_modded:
             raw = str(self.max_players_field.component.value or "").strip()
             if not raw.isdecimal() or not 2 <= int(raw) <= 10:
@@ -592,8 +592,10 @@ class LFGUpdateEssentialsModal(discord.ui.Modal, title="Edit Essentials"):
                 default=_lobby_prefill(record.get("lobby")),
             ),
         )
+        # Mirror the posting form exactly: separate Max Players and Gamemode
+        # controls per variant, never the fused modal's cross-product radio
+        # (that layout exists only because the slash form has no spare slots).
         if is_modded:
-            self.core_field = None
             self.max_players_field = discord.ui.Label(
                 text="Max Players",
                 description="A number from 2 to 10",
@@ -604,48 +606,44 @@ class LFGUpdateEssentialsModal(discord.ui.Modal, title="Edit Essentials"):
                     default=_players_prefill(settings.get("Max Players")),
                 ),
             )
-            self.gamemode_field = discord.ui.Label(
-                text="Gamemode",
-                component=discord.ui.RadioGroup(
-                    options=[
-                        discord.RadioGroupOption(
-                            label=mode,
-                            value=mode,
-                            default=(settings.get("Gamemode") == mode),
-                        )
-                        for mode in ("FFA", "Teams", "Modded Gamemode")
-                    ],
-                    required=True,
-                ),
-            )
+            gamemode_values = ("FFA", "Teams", "Modded Gamemode")
+            gamemode_placeholder = "FFA, Teams, or Modded Gamemode?"
         else:
-            self.max_players_field = None
-            self.gamemode_field = None
-            stored_combo = None
-            if settings.get("Max Players") and settings.get("Gamemode"):
-                stored_combo = f'{settings["Max Players"]}|{settings["Gamemode"]}'
-            self.core_field = discord.ui.Label(
-                text="Lobby Setup",
-                description="Max players and gamemode",
-                component=discord.ui.RadioGroup(
-                    options=[
-                        discord.RadioGroupOption(
-                            label=f"{n} players, {mode}",
-                            value=f"{n}|{mode}",
-                            default=(stored_combo == f"{n}|{mode}"),
-                        )
-                        for n in (2, 3, 4)
-                        for mode in ("FFA", "Teams")
-                    ],
+            self.max_players_field = discord.ui.Label(
+                text="Max Players",
+                component=discord.ui.Select(
+                    placeholder="How many players can join?",
                     required=True,
+                    options=[
+                        discord.SelectOption(
+                            label=value, default=(settings.get("Max Players") == value)
+                        )
+                        for value in ("2", "3", "4")
+                    ],
                 ),
             )
+            gamemode_values = ("FFA", "Teams")
+            gamemode_placeholder = "FFA or Teams?"
+        self.gamemode_field = discord.ui.Label(
+            text="Gamemode",
+            component=discord.ui.Select(
+                placeholder=gamemode_placeholder,
+                required=True,
+                options=[
+                    discord.SelectOption(
+                        label=value, default=(settings.get("Gamemode") == value)
+                    )
+                    for value in gamemode_values
+                ],
+            ),
+        )
         if is_modded:
             notes_description = f"Optional, but please list the mods your lobby is running! Max {NOTES_MAX_LENGTH} characters."
         else:
             notes_description = f"Optional. Casual? Competitive? Anything else! Max {NOTES_MAX_LENGTH} characters."
         self.randomizer_field = discord.ui.Label(
             text="Weapon Randomizer",
+            description="Optional. Pick Not set to remove it.",
             component=discord.ui.Select(
                 placeholder="Full Randomize, Swapped, Custom Randomize, or No?",
                 required=False,
@@ -662,35 +660,40 @@ class LFGUpdateEssentialsModal(discord.ui.Modal, title="Edit Essentials"):
                 style=discord.TextStyle.paragraph,
                 max_length=NOTES_MAX_LENGTH,
                 required=False,
+                placeholder=(
+                    "Which mods are you using? Anything else to note?" if is_modded else None
+                ),
                 default=_notes_prefill(record.get("notes")),
             ),
         )
-        fields = [self.lobby_id_field]
-        if is_modded:
-            fields.extend([self.max_players_field, self.gamemode_field])
-        else:
-            fields.append(self.core_field)
-        fields.extend([self.randomizer_field, self.notes_field])
-        for field in fields:
+        for field in (
+            self.lobby_id_field,
+            self.max_players_field,
+            self.gamemode_field,
+            self.randomizer_field,
+            self.notes_field,
+        ):
             self.add_item(field)
 
     def read_core(self) -> Tuple[Optional[str], Optional[str], Optional[str]]:
-        """(max_players, gamemode, error_message) for either variant.
-        Duplicated between LFGFusedModal and LFGUpdateEssentialsModal
-        (same field attributes); keep the two copies in sync."""
+        """(max_players, gamemode, error_message). Reads the posting-form
+        layout this modal mirrors: Max Players is a numeric text input on the
+        modded variant and a 2/3/4 select on vanilla; Gamemode is a select on
+        both."""
         if self.is_modded:
             raw = str(self.max_players_field.component.value or "").strip()
             if not raw.isdecimal() or not 2 <= int(raw) <= 10:
                 return None, None, "Max Players must be a number from 2 to 10."
-            gamemode = self.gamemode_field.component.value
-            if not gamemode:
+            max_players = str(int(raw))
+        else:
+            values = self.max_players_field.component.values
+            if not values:
                 return None, None, "A required selection is missing. Please try again."
-            return str(int(raw)), gamemode, None
-        value = self.core_field.component.value
-        if not value:
+            max_players = values[0]
+        gamemode_values = self.gamemode_field.component.values
+        if not gamemode_values:
             return None, None, "A required selection is missing. Please try again."
-        max_players, _, gamemode = value.partition("|")
-        return max_players, gamemode, None
+        return max_players, gamemode_values[0], None
 
     async def on_submit(self, interaction: discord.Interaction):
         await self.cog.handle_update_essentials(interaction, self)
