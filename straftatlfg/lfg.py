@@ -53,6 +53,20 @@ def _notes_prefill(value):
     return None
 
 
+def _update_select_options(values, stored):
+    """Options for a per-category /lfgupdate dropdown: the real values plus a
+    'Not set' entry (value __clear__) so removing a setting is explicit. The
+    current state is always marked default, so an untouched select submits it
+    unchanged and the form always shows the post's current configuration."""
+    options = [
+        discord.SelectOption(label=value, default=(stored == value)) for value in values
+    ]
+    options.append(
+        discord.SelectOption(label="Not set", value="__clear__", default=(stored is None))
+    )
+    return options
+
+
 class LFGPostModal(discord.ui.Modal, title="Post an LFG"):
     """Stage one of the guided two-modal bridge: the sticky quick-post
     buttons and the /testlfg + /testlfgmod testers. The slash commands use
@@ -554,8 +568,9 @@ class LFGDraftPanelView(discord.ui.View):
 
 
 class LFGUpdateEssentialsModal(discord.ui.Modal, title="Edit Essentials"):
-    """Partial /lfgupdate form: Lobby ID, players and gamemode, and Notes,
-    prefilled from the stored post. Optional settings have their own modal."""
+    """Partial /lfgupdate form mirroring the stage-one posting layout: Lobby
+    ID, players and gamemode, Weapon Randomizer, and Notes, prefilled from
+    the stored post. The remaining optional settings have their own modal."""
 
     def __init__(self, cog, panel):
         super().__init__(title="Edit Essentials")
@@ -629,6 +644,17 @@ class LFGUpdateEssentialsModal(discord.ui.Modal, title="Edit Essentials"):
             notes_description = f"Optional, but please list the mods your lobby is running! Max {NOTES_MAX_LENGTH} characters."
         else:
             notes_description = f"Optional. Casual? Competitive? Anything else! Max {NOTES_MAX_LENGTH} characters."
+        self.randomizer_field = discord.ui.Label(
+            text="Weapon Randomizer",
+            component=discord.ui.Select(
+                placeholder="Full Randomize, Swapped, Custom Randomize, or No?",
+                required=False,
+                options=_update_select_options(
+                    ("Full Randomize", "Swapped", "Custom Randomize", "No"),
+                    settings.get("Weapon Randomizer"),
+                ),
+            ),
+        )
         self.notes_field = discord.ui.Label(
             text="Notes",
             description=notes_description,
@@ -644,7 +670,7 @@ class LFGUpdateEssentialsModal(discord.ui.Modal, title="Edit Essentials"):
             fields.extend([self.max_players_field, self.gamemode_field])
         else:
             fields.append(self.core_field)
-        fields.append(self.notes_field)
+        fields.extend([self.randomizer_field, self.notes_field])
         for field in fields:
             self.add_item(field)
 
@@ -682,8 +708,11 @@ class LFGUpdateEssentialsModal(discord.ui.Modal, title="Edit Essentials"):
 
 
 class LFGUpdateOptionalModal(discord.ui.Modal, title="Edit Optional Settings"):
-    """Partial /lfgupdate form: the packed optional settings and First To,
-    prefilled. Available on both variants, so modded posts can set First To
+    """Partial /lfgupdate form mirroring the stage-two posting layout: First
+    To plus one labeled dropdown per category, each prefilled with the post's
+    current state and carrying a 'Not set' entry for explicit removal. Weapon
+    Randomizer lives on the Edit Essentials form, matching where it sits when
+    posting. Available on both variants, so modded posts can set First To
     here even though their posting form has no room for the field."""
 
     def __init__(self, cog, panel):
@@ -692,24 +721,6 @@ class LFGUpdateOptionalModal(discord.ui.Modal, title="Edit Optional Settings"):
         self.panel = panel
         settings = (panel.record or {}).get("settings") or {}
 
-        self.settings_field = discord.ui.Label(
-            text="Optional Settings",
-            description="Pick at most one option per category",
-            component=discord.ui.Select(
-                placeholder="Randomizer, lobby type, friendly fire and more",
-                min_values=0,
-                max_values=len(LFGFusedModal.PACKED_OPTIONS),
-                required=False,
-                options=[
-                    discord.SelectOption(
-                        label=f"{group}: {value}",
-                        value=f"{group}|{value}",
-                        default=(settings.get(group) == value),
-                    )
-                    for group, value in LFGFusedModal.PACKED_OPTIONS
-                ],
-            ),
-        )
         self.first_to_field = discord.ui.Label(
             text="First To",
             description="Optional. First to how many wins? 1 to 50.",
@@ -720,8 +731,54 @@ class LFGUpdateOptionalModal(discord.ui.Modal, title="Edit Optional Settings"):
                 default=_first_to_prefill(settings.get("First To")),
             ),
         )
-        self.add_item(self.settings_field)
-        self.add_item(self.first_to_field)
+        self.lobby_type_field = discord.ui.Label(
+            text="Lobby Type",
+            component=discord.ui.Select(
+                placeholder="Who can join the lobby?",
+                required=False,
+                options=_update_select_options(
+                    ("Public", "Invite Only", "Private"), settings.get("Lobby Type")
+                ),
+            ),
+        )
+        self.friendly_fire_field = discord.ui.Label(
+            text="Friendly Fire",
+            component=discord.ui.Select(
+                placeholder="Friendly fire setting?",
+                required=False,
+                options=_update_select_options(
+                    ("Enabled", "Disabled"), settings.get("Friendly Fire")
+                ),
+            ),
+        )
+        self.mid_match_field = discord.ui.Label(
+            text="Mid-Match Joining",
+            component=discord.ui.Select(
+                placeholder="Allow joining mid-match?",
+                required=False,
+                options=_update_select_options(
+                    ("Yes", "No"), settings.get("Mid-Match Joining")
+                ),
+            ),
+        )
+        self.outlines_field = discord.ui.Label(
+            text="Enemy Outlines",
+            component=discord.ui.Select(
+                placeholder="Show enemy outlines?",
+                required=False,
+                options=_update_select_options(
+                    ("Enabled", "Disabled"), settings.get("Enemy Outlines")
+                ),
+            ),
+        )
+        for field in (
+            self.first_to_field,
+            self.lobby_type_field,
+            self.friendly_fire_field,
+            self.mid_match_field,
+            self.outlines_field,
+        ):
+            self.add_item(field)
 
     async def on_submit(self, interaction: discord.Interaction):
         await self.cog.handle_update_optional(interaction, self)
@@ -1807,7 +1864,8 @@ class LFG(commands.Cog):
 
     async def handle_update_essentials(self, interaction: discord.Interaction, modal: LFGUpdateEssentialsModal):
         """Partial update from the Edit Essentials modal: Lobby ID, players
-        and gamemode, and Notes. Optional settings are preserved as stored."""
+        and gamemode, Weapon Randomizer, and Notes. The stage-two optional
+        settings are preserved as stored."""
         lobby = str(modal.lobby_id_field.component.value or "").strip()
         if not lobby.isdecimal() or not LOBBY_ID_MIN_LENGTH <= len(lobby) <= LOBBY_ID_MAX_LENGTH:
             return await interaction.response.send_message(
@@ -1820,43 +1878,47 @@ class LFG(commands.Cog):
         notes = self.sanitize_notes(
             modal.notes_field.component.value or None, allow_links=modal.is_modded
         )
-        await self._finish_lfg_update(
-            interaction,
-            modal.panel,
-            essentials={
-                "lobby": lobby,
-                "notes": notes,
-                "max_players": max_players,
-                "gamemode": gamemode,
-            },
-        )
+        essentials: Dict[str, Optional[str]] = {
+            "lobby": lobby,
+            "notes": notes,
+            "max_players": max_players,
+            "gamemode": gamemode,
+        }
+        randomizer_values = modal.randomizer_field.component.values
+        if randomizer_values:
+            essentials["randomizer"] = (
+                None if randomizer_values[0] == "__clear__" else randomizer_values[0]
+            )
+        # An empty submit (no selection, no default marked) omits the key
+        # entirely: the freshly re-read stored value stays authoritative.
+        await self._finish_lfg_update(interaction, modal.panel, essentials=essentials)
 
     async def handle_update_optional(self, interaction: discord.Interaction, modal: LFGUpdateOptionalModal):
-        """Partial update from the Edit Optional Settings modal. The form is
-        authoritative for every optional category and First To: deselecting a
-        prefilled option (or clearing First To) removes that setting."""
+        """Partial update from the Edit Optional Settings modal. One dropdown
+        per category makes conflicts impossible client-side; each dropdown
+        always shows the current state (Not set when absent), so an untouched
+        form changes nothing, picking a value sets it, and picking Not set
+        (or clearing First To) removes that setting."""
         first_to_raw = str(modal.first_to_field.component.value or "").strip()
         if first_to_raw and (not first_to_raw.isdecimal() or not 1 <= int(first_to_raw) <= 50):
             return await interaction.response.send_message(
                 "First To must be a number from 1 to 50.", ephemeral=True
             )
-        picked: Dict[str, str] = {}
-        conflicts = []
-        for raw in modal.settings_field.component.values:
-            group, _, value = raw.partition("|")
-            if group in picked and group not in conflicts:
-                conflicts.append(group)
-            picked[group] = value
-        if conflicts:
-            return await interaction.response.send_message(
-                "Pick at most one option per category. You picked more than one"
-                f" for: {', '.join(conflicts)}. Please try again.",
-                ephemeral=True,
-            )
-        optional = self._blank_optional_settings()
-        optional["First To"] = str(int(first_to_raw)) if first_to_raw else None
-        for group, value in picked.items():
-            optional[group] = value
+        optional: Dict[str, Optional[str]] = {
+            "First To": str(int(first_to_raw)) if first_to_raw else None
+        }
+        for group, field in (
+            ("Lobby Type", modal.lobby_type_field),
+            ("Friendly Fire", modal.friendly_fire_field),
+            ("Mid-Match Joining", modal.mid_match_field),
+            ("Enemy Outlines", modal.outlines_field),
+        ):
+            values = field.component.values
+            if not values:
+                # Defensive: a default is always marked, so an empty submit
+                # should not occur; skip the category (stored value kept).
+                continue
+            optional[group] = None if values[0] == "__clear__" else values[0]
         await self._finish_lfg_update(interaction, modal.panel, optional=optional)
 
     async def _finish_lfg_update(
@@ -1888,7 +1950,9 @@ class LFG(commands.Cog):
                     "Your last post changed since this panel opened. Run /lfgupdate again.",
                     ephemeral=True,
                 )
-            # Rebase the deltas onto the fresh read.
+            # Rebase the deltas onto the fresh read. Each delta touches only
+            # the fields its form controls (None removes a setting); untouched
+            # categories keep their stored values.
             record: Dict[str, object] = dict(current)
             settings = dict(record.get("settings") or {})
             if essentials is not None:
@@ -1896,16 +1960,26 @@ class LFG(commands.Cog):
                 settings["Gamemode"] = essentials["gamemode"]
                 record["lobby"] = essentials["lobby"]
                 record["notes"] = essentials["notes"]
+                if "randomizer" in essentials:
+                    if essentials["randomizer"] is None:
+                        settings.pop("Weapon Randomizer", None)
+                    else:
+                        settings["Weapon Randomizer"] = essentials["randomizer"]
             if optional is not None:
-                rebuilt: Dict[str, str] = {}
-                for name in ("Max Players", "Gamemode", "Modded Lobby"):
-                    if settings.get(name) is not None:
-                        rebuilt[name] = settings[name]
                 for name, value in optional.items():
-                    if value is not None:
-                        rebuilt[name] = value
-                settings = rebuilt
-            record["settings"] = settings
+                    if value is None:
+                        settings.pop(name, None)
+                    else:
+                        settings[name] = value
+            # Normalize to the canonical display order.
+            ordered: Dict[str, str] = {}
+            for name in ("Max Players", "Gamemode", "Modded Lobby"):
+                if settings.get(name) is not None:
+                    ordered[name] = settings[name]
+            for name in self._blank_optional_settings():
+                if settings.get(name) is not None:
+                    ordered[name] = settings[name]
+            record["settings"] = ordered
             # Update cooldown: synchronous check-and-stamp after the awaited
             # reads, refunded (compare-and-clear) if the edit never lands.
             key = (interaction.guild.id, member.id)
