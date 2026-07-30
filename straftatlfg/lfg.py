@@ -1452,7 +1452,10 @@ class LFG(commands.Cog):
         is_modded: bool = False,
         updated: bool = False,
     ) -> discord.Embed:
-        """Same look as the legacy embed, plus Region and lobby-settings
+        """Same look as the legacy embed minus the Host field (the host lives
+        in the message content, where the mention ships resolved user data
+        and renders on every client; embed mentions show raw markup on
+        clients without the member cached), plus Region and lobby-settings
         fields. Color-coded by moddedness: vanilla lobbies are green, modded
         lobbies are blue (stock palette). updated=True marks an /lfgupdate
         edit in the footer."""
@@ -1460,7 +1463,6 @@ class LFG(commands.Cog):
         color = discord.Color.blue() if is_modded else discord.Color.green()
         embed = discord.Embed(title=title, color=color, description=notes)
         embed.add_field(name="Lobby ID", value=f"`{lobby_id}`", inline=True)
-        embed.add_field(name="Host", value=member.mention, inline=True)
         if region is not None:
             embed.add_field(name="Region", value=f"{region[0]} {region[1]}", inline=True)
         for name, value in (settings or {}).items():
@@ -1579,9 +1581,14 @@ class LFG(commands.Cog):
         embed = self.build_lfg_embed(
             member, lobby, notes, region=region, settings=settings, is_modded=modal.is_modded
         )
-        mentions = discord.AllowedMentions(roles=[role])
+        # The host mention must be allowed, not suppressed: only parsed
+        # mentions ship resolved user data, and without it clients that have
+        # not cached the member render raw <@id> markup (the reason the Host
+        # field left the embed). Cost: the host is notified of their own post.
+        content = f"{role.mention} User {member.mention} is looking for a match!"
+        mentions = discord.AllowedMentions(everyone=False, roles=[role], users=[member])
         try:
-            message = await channel.send(content=role.mention, embed=embed, allowed_mentions=mentions)
+            message = await channel.send(content=content, embed=embed, allowed_mentions=mentions)
         except discord.HTTPException:
             log.exception("Failed to send LFG post to channel %s", modal.destination_id)
             if modal.committed_stamp is not None:
@@ -1804,8 +1811,20 @@ class LFG(commands.Cog):
                 is_modded=bool(record.get("is_modded")),
                 updated=True,
             )
+            # Rewrite the content line alongside the embed: edits never
+            # notify, so this re-pings nobody, keeps the line canonical, and
+            # migrates pre-Revision-31 posts (role-only content, Host field
+            # in the embed) to the current format on their first update. If
+            # the role is missing, edit the embed alone rather than fail.
+            edit_kwargs: Dict[str, object] = {"embed": embed}
+            role = interaction.guild.get_role(self.LFG_ROLE_ID)
+            if role is not None:
+                edit_kwargs["content"] = f"{role.mention} User {member.mention} is looking for a match!"
+                edit_kwargs["allowed_mentions"] = discord.AllowedMentions(
+                    everyone=False, roles=[role], users=[member]
+                )
             try:
-                await message.edit(embed=embed)
+                await message.edit(**edit_kwargs)
             except discord.HTTPException:
                 log.exception("Failed to edit LFG post %s", panel.message_id)
                 if self._update_last.get(key) == now:
@@ -2097,10 +2116,14 @@ class LFG(commands.Cog):
                 settings=settings,
                 is_modded=draft["is_modded"],
             )
-            mentions = discord.AllowedMentions(roles=[role])
+            # Allowed, not suppressed, so the pill renders on uncached
+            # clients (see handle_direct_submit); the host self-ping is the
+            # accepted cost.
+            content = f"{role.mention} User {member.mention} is looking for a match!"
+            mentions = discord.AllowedMentions(everyone=False, roles=[role], users=[member])
 
             try:
-                message = await channel.send(content=role.mention, embed=embed, allowed_mentions=mentions)
+                message = await channel.send(content=content, embed=embed, allowed_mentions=mentions)
             except discord.HTTPException:
                 log.exception("Failed to send chained LFG post to channel %s", draft["destination_id"])
                 if stamp is not None:
