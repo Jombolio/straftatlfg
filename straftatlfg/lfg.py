@@ -815,6 +815,15 @@ class LFG(commands.Cog):
     LFG_UPDATE_COOLDOWN_SECONDS = 10  # /lfgupdate cooldown; updates never re-ping, so it is short
     REGION_CHANNEL_ID = 1358380625744105522  # regions channel: hosts the region reaction message
 
+    # Honeypot ban tracker: Defender Warden's 'honeypot-bot-ban' rule softbans
+    # anyone posting in the honeypot channel; each such ban is counted and the
+    # running total is displayed by renaming this voice channel. The marker is
+    # matched against the audit-log ban reason, which Defender writes as
+    # "Banned by Warden rule 'honeypot-bot-ban'".
+    HONEYPOT_TRACKER_CHANNEL_ID = 1533509427439604023
+    HONEYPOT_BAN_REASON_MARKER = "Warden rule 'honeypot-bot-ban'"
+    HONEYPOT_TRACKER_NAME = "Bots Banned: {count}"
+
     # Region reaction roles, in display order: (emoji, label, role_id)
     REGION_ROLES = [
         ("1️⃣", "CIS / СНГ", 1518155782116605976),
@@ -842,6 +851,9 @@ class LFG(commands.Cog):
         # never touch these. The new sticky keys are registered separately so
         # the legacy default_guild dict above stays untouched.
         self.config.register_guild(new_sticky_channels=[], new_sticky_cache={})
+        # Honeypot ban tracker counter (registered separately, same pattern
+        # as the new-sticky keys above).
+        self.config.register_guild(honeypot_ban_count=0)
         self._cooldown_cache: Dict[Tuple[int, int], float] = {}
         self._ping_toggle_last: Dict[int, float] = {}
         # /lfgupdate cooldown stamps; in-memory only (10s window, restart
@@ -853,6 +865,14 @@ class LFG(commands.Cog):
         # without a Config read per message.
         self._new_sticky_ids: Dict[int, int] = {}
         self._sticky_view: Optional[LFGStickyView] = None
+        # Honeypot tracker state. The lock serializes the counter's
+        # read-modify-write (concurrent audit entries during a bot raid);
+        # updating/dirty coalesce channel renames, because Discord hard-caps
+        # channel renames at 2 per 10 minutes and a ban burst must collapse
+        # into one trailing rename instead of queueing an edit per ban.
+        self._honeypot_count_lock = asyncio.Lock()
+        self._honeypot_updating = False
+        self._honeypot_dirty = False
 
     async def cog_load(self):
         # Persistent-view registration: one static view serves every deployed
@@ -2545,6 +2565,132 @@ class LFG(commands.Cog):
             await interaction.followup.send(
                 "I don't have permission to manage that role.", ephemeral=True
             )
+
+    # -- Honeypot ban tracker --------------------------------------------------
+
+    @commands.Cog.listener()
+    async def on_audit_log_entry_create(self, entry: discord.AuditLogEntry):
+        """Count Defender Warden 'honeypot-bot-ban' softbans and mirror the
+        total into the tracker voice channel's name. The audit-log event is
+        used instead of on_member_ban because a softban unbans immediately
+        (fetch_ban would race the unban) while the audit entry carries the
+        reason directly. Requires the View Audit Log permission; the gateway
+        does not deliver this event without it."""
+        if entry.action != discord.AuditLogAction.ban:
+            return
+        if self.HONEYPOT_BAN_REASON_MARKER not in (entry.reason or ""):
+            return
+        guild = entry.guild
+        async with self._honeypot_count_lock:
+            count = await self.config.guild(guild).honeypot_ban_count() + 1
+            await self.config.guild(guild).honeypot_ban_count.set(count)
+        await self._sync_honeypot_tracker(guild)
+
+    async def _sync_honeypot_tracker(self, guild: discord.Guild):
+        """Rename the tracker channel to show the stored count. Coalesced: at
+        most one edit is ever in flight; bans landing while it waits out the
+        rename rate limit set dirty, and the trailing loop iteration re-reads
+        the counter so one rename lands the freshest total."""
+        if self._honeypot_updating:
+            self._honeypot_dirty = True
+            return
+        self._honeypot_updating = True
+        try:
+            while True:
+                self._honeypot_dirty = False
+                channel = guild.get_channel(self.HONEYPOT_TRACKER_CHANNEL_ID)
+                if channel is None:
+                    return
+                name = self.HONEYPOT_TRACKER_NAME.format(
+                    count=await self.config.guild(guild).honeypot_ban_count()
+                )
+                if channel.name != name:
+                    try:
+                        await channel.edit(name=name, reason="Honeypot ban tracker update")
+                    except discord.HTTPException:
+                        log.exception("Failed to rename the honeypot tracker channel")
+                        return
+                if not self._honeypot_dirty:
+                    return
+        finally:
+            self._honeypot_updating = False
+
+    @commands.command(name="honeypotcount")
+    @commands.guild_only()
+    @checks.admin_or_permissions(administrator=True)
+    async def honeypotcount(self, ctx: commands.Context, count: Optional[int] = None):
+        """
+        Show or set the honeypot ban counter.
+
+        With no argument, shows the stored count and where it is displayed.
+        With a number (e.g. to backfill bans from before the tracker
+        existed), sets the counter and renames the tracker channel.
+        """
+        if count is None:
+            stored = await self.config.guild(ctx.guild).honeypot_ban_count()
+            channel = ctx.guild.get_channel(self.HONEYPOT_TRACKER_CHANNEL_ID)
+            location = channel.mention if channel else "a channel I can't find"
+            return await ctx.send(
+                f"Honeypot bans counted: **{stored}** (displayed on {location})."
+            )
+        if count < 0:
+            return await ctx.send("The count can't be negative.")
+        async with self._honeypot_count_lock:
+            await self.config.guild(ctx.guild).honeypot_ban_count.set(count)
+        await self._sync_honeypot_tracker(ctx.guild)
+        await ctx.send(
+            f"Honeypot ban counter set to **{count}**. The channel name will"
+            " update shortly (channel renames are rate-limited to 2 per 10 minutes)."
+        )
+
+    @commands.command(name="honeypotbackfill")
+    @commands.guild_only()
+    @checks.admin_or_permissions(administrator=True)
+    async def honeypotbackfill(self, ctx: commands.Context):
+        """
+        Scan the audit log for past honeypot bans and set the counter.
+
+        Discord retains audit log entries for 45 days, so older bans cannot
+        be recovered; if you know how many there were, add them on top with
+        `[p]honeypotcount <number>` afterwards. Safe to re-run: the scan
+        overwrites the counter with the full recount (bans the live listener
+        already counted are in the audit log too, so nothing double-counts).
+        """
+        async with ctx.typing():
+            # Baseline under the lock: listener increments that land while
+            # the scan walks backwards through history are newer than the
+            # scan's start point and thus invisible to it; the drift between
+            # baseline and the post-scan count is exactly those bans.
+            async with self._honeypot_count_lock:
+                baseline = await self.config.guild(ctx.guild).honeypot_ban_count()
+            total = 0
+            users = set()
+            try:
+                async for entry in ctx.guild.audit_logs(
+                    action=discord.AuditLogAction.ban, limit=None
+                ):
+                    if self.HONEYPOT_BAN_REASON_MARKER in (entry.reason or ""):
+                        total += 1
+                        if entry.target is not None:
+                            users.add(entry.target.id)
+            except discord.Forbidden:
+                return await ctx.send(
+                    "I need the View Audit Log permission to scan for past bans."
+                )
+            except discord.HTTPException:
+                log.exception("Audit log scan failed during honeypot backfill")
+                return await ctx.send("The audit log scan failed partway. Please try again.")
+            async with self._honeypot_count_lock:
+                current = await self.config.guild(ctx.guild).honeypot_ban_count()
+                drift = max(0, current - baseline)
+                await self.config.guild(ctx.guild).honeypot_ban_count.set(total + drift)
+        await self._sync_honeypot_tracker(ctx.guild)
+        await ctx.send(
+            f"Found **{total}** honeypot bans (**{len(users)}** unique users) in the"
+            f" audit log and set the counter to **{total + drift}**. Discord only keeps"
+            " audit log entries for 45 days; if you know how many bans happened before"
+            f" that, set the full total with `{ctx.clean_prefix}honeypotcount <number>`."
+        )
 
     # No cog_app_command_error handler: Red's RedTree.on_error already logs
     # unexpected app-command exceptions and replies ephemerally; a cog handler
